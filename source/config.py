@@ -7,8 +7,10 @@ import os
 
 from dotenv import load_dotenv
 
+# 项目根目录为本文件所在的 source/ 目录的上一级
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 加载项目根目录下的 .env 文件
-_ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+_ENV_FILE = os.path.join(_PROJECT_ROOT, ".env")
 load_dotenv(_ENV_FILE)
 
 # API 基础地址（可通过 .env 中的 LLM_BASE_URL 覆盖）
