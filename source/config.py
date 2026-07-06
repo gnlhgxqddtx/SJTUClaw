@@ -28,6 +28,15 @@ SUPPORTED_MODELS = {
 # 默认使用的模型（可通过 .env 中的 LLM_MODEL 覆盖）
 DEFAULT_MODEL = os.getenv("LLM_MODEL", "glm")
 
+# 会话持久化存储目录（项目根目录下 data/sessions/）
+SESSIONS_DIR = os.path.join(_PROJECT_ROOT, "data", "sessions")
+
+# system prompt 与 soul 配置目录（项目根目录下 system_prompt/）
+PROMPT_DIR = os.path.join(_PROJECT_ROOT, "system_prompt")
+
+# 长期记忆持久化文件（项目根目录下 data/memory.json），跨会话共享
+MEMORY_FILE = os.path.join(_PROJECT_ROOT, "data", "memory.json")
+
 
 def load_api_key() -> str:
     """从 .env 文件（环境变量 LLM_API_KEY）加载 API Key"""
