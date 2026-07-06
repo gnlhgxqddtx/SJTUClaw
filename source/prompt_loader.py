@@ -21,6 +21,7 @@ class PromptLoader:
         path = self.prompt_dir / filename
         if not path.exists():
             print(f"[警告] 未找到提示词配置文件: {path}")
+            print(f"       可复制同目录下的 {filename.rsplit('.', 1)[0]}.example.md 为 {filename} 后重试。")
             return ""
         try:
             return path.read_text(encoding="utf-8").strip()
