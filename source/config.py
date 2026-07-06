@@ -31,8 +31,11 @@ DEFAULT_MODEL = os.getenv("LLM_MODEL", "glm")
 # 会话持久化存储目录（项目根目录下 data/sessions/）
 SESSIONS_DIR = os.path.join(_PROJECT_ROOT, "data", "sessions")
 
-# 默认系统提示词，每轮对话都会置于会话历史最前面发送给模型
-SYSTEM_PROMPT = "你是 DD-SJTUClaw 智能对话助手，请用简洁、友好的方式回答用户。"
+# system prompt 与 soul 配置目录（项目根目录下 system_prompt/）
+PROMPT_DIR = os.path.join(_PROJECT_ROOT, "system_prompt")
+
+# 长期记忆持久化文件（项目根目录下 data/memory.json），跨会话共享
+MEMORY_FILE = os.path.join(_PROJECT_ROOT, "data", "memory.json")
 
 
 def load_api_key() -> str:

@@ -7,8 +7,11 @@ DD-SJTUClaw 交互式命令行入口
 
 import sys
 
-from .config import DEFAULT_MODEL, SESSIONS_DIR, SYSTEM_PROMPT
+from .config import DEFAULT_MODEL, SESSIONS_DIR, PROMPT_DIR, MEMORY_FILE
+from .context_builder import build_messages
 from .llm_client import LLMClient
+from .memory_store import MemoryStore, MemoryError
+from .prompt_loader import PromptLoader
 from .session_manager import SessionManager, SessionError
 
 SEP = "=" * 60
@@ -34,6 +37,8 @@ def print_banner(model, session):
     print("  /session list   - 列出所有会话")
     print("  /session new    - 创建新会话")
     print("  /session switch - 切换会话")
+    print("  /memory list    - 查看长期记忆")
+    print("  /memory add     - 添加长期记忆")
     print("  /help           - 显示帮助")
     print(LINE)
     print(f"📂 当前会话: {session.title} ({session.session_id})")
@@ -49,6 +54,9 @@ def print_help():
     print("  /session switch <id>         - 切换到指定会话")
     print("  /session delete <id>         - 删除指定会话")
     print("  /session rename <id> <title> - 重命名会话")
+    print("  /memory list                 - 列出所有长期记忆")
+    print("  /memory add <内容>           - 添加一条长期记忆")
+    print("  /memory delete <id>          - 删除指定长期记忆")
 
 
 def _print_session_list(manager):
@@ -104,11 +112,48 @@ def handle_session_command(manager, raw):
         print(f"未知的 session 子命令: {sub}（输入 /help 查看帮助）")
 
 
-def chat_once(client, manager, user_input):
-    """把用户输入加入历史，连同完整历史发给模型，流式打印并保存回复。"""
+def _print_memory_list(memory_store):
+    memories = memory_store.list()
+    if not memories:
+        print("（暂无长期记忆）")
+        return
+    print("Memories:")
+    for m in memories:
+        print(f"  {m['id']:<10} {m['content']}")
+
+
+def handle_memory_command(memory_store, raw):
+    parts = raw.split(maxsplit=2)
+    sub = parts[1] if len(parts) >= 2 else "list"
+    if sub == "list":
+        _print_memory_list(memory_store)
+    elif sub == "add":
+        if len(parts) < 3 or not parts[2].strip():
+            print("用法: /memory add <内容>")
+            return
+        try:
+            item = memory_store.add(parts[2])
+            print(f"Added memory: {item['id']}")
+        except MemoryError as e:
+            print(f"[错误] {e}")
+    elif sub == "delete":
+        if len(parts) < 3 or not parts[2].strip():
+            print("用法: /memory delete <id>")
+            return
+        try:
+            deleted_id = memory_store.delete(parts[2].strip())
+            print(f"Deleted memory: {deleted_id}")
+        except MemoryError as e:
+            print(f"[错误] {e}")
+    else:
+        print(f"未知的 memory 子命令: {sub}（输入 /help 查看帮助）")
+
+
+def chat_once(client, manager, stable_prompt, memory_store, user_input):
+    """把用户输入加入历史，连同稳定上下文与完整历史发给模型，流式打印并保存回复。"""
     session = manager.current
     session.add_message("user", user_input)
-    full_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + session.messages
+    full_messages = build_messages(stable_prompt, memory_store.list(), session.messages)
 
     print("[Assistant] ", end="", flush=True)
     reply_parts = []
@@ -133,6 +178,8 @@ def main():
     _reconfigure_io()
     try:
         manager = SessionManager(SESSIONS_DIR)
+        memory_store = MemoryStore(MEMORY_FILE)
+        stable_prompt = PromptLoader(PROMPT_DIR).stable_prompt()
         client = LLMClient(model=DEFAULT_MODEL)
     except Exception as e:
         print(f"[启动失败] {e}")
@@ -158,11 +205,14 @@ def main():
         if user_input.startswith("/session"):
             handle_session_command(manager, user_input)
             continue
+        if user_input.startswith("/memory"):
+            handle_memory_command(memory_store, user_input)
+            continue
         if user_input.startswith("/"):
             print(f"未知命令: {user_input}（输入 /help 查看帮助）")
             continue
 
-        chat_once(client, manager, user_input)
+        chat_once(client, manager, stable_prompt, memory_store, user_input)
 
     return 0
 

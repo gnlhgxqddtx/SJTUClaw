@@ -58,3 +58,6 @@ Thumbs.db
 
 # ===== 会话数据（本地运行产生，不纳入版本库）=====
 data/sessions/*.json
+
+# ===== 长期记忆数据（本地运行产生，不纳入版本库）=====
+data/memory.json
