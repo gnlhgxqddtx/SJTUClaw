@@ -109,6 +109,24 @@ class SessionManager:
         self.save(session)
         return session
 
+    def resolve_id(self, user_id):
+        """把用户输入的简写解析为真实会话 ID：
+        - 精确匹配（如 session_001）
+        - 补全前缀（如 001 -> session_001）
+        - 纯数字补零（如 1 -> session_001）
+        找不到则返回 None。
+        """
+        if user_id in self.sessions:
+            return user_id
+        prefixed = f"session_{user_id}"
+        if prefixed in self.sessions:
+            return prefixed
+        if user_id.isdigit():
+            padded = f"session_{int(user_id):03d}"
+            if padded in self.sessions:
+                return padded
+        return None
+
     def new_session(self, title="新会话"):
         session = Session(session_id=self._next_id(), title=title)
         self.sessions[session.session_id] = session
@@ -117,32 +135,36 @@ class SessionManager:
         return session
 
     def switch(self, session_id):
-        if session_id not in self.sessions:
+        resolved = self.resolve_id(session_id)
+        if resolved is None:
             raise SessionError(f"没有找到会话: {session_id}")
-        self.current_id = session_id
-        return self.sessions[session_id]
+        self.current_id = resolved
+        return self.sessions[resolved]
 
     def delete(self, session_id):
-        if session_id not in self.sessions:
+        resolved = self.resolve_id(session_id)
+        if resolved is None:
             raise SessionError(f"没有找到会话: {session_id}")
-        del self.sessions[session_id]
-        path = self._path(session_id)
+        del self.sessions[resolved]
+        path = self._path(resolved)
         try:
             if path.exists():
                 path.unlink()
         except OSError as e:
             raise SessionError(f"删除会话文件失败（{path}）: {e}")
         # 若删除的是当前会话，切换到最近更新的会话；若已无会话则新建默认会话
-        if self.current_id == session_id:
+        if self.current_id == resolved:
             if self.sessions:
                 self.current_id = self.list_sorted()[0].session_id
             else:
                 self._create_default()
+        return resolved
 
     def rename(self, session_id, new_title):
-        if session_id not in self.sessions:
+        resolved = self.resolve_id(session_id)
+        if resolved is None:
             raise SessionError(f"没有找到会话: {session_id}")
-        session = self.sessions[session_id]
+        session = self.sessions[resolved]
         session.title = new_title
         session.updated_at = datetime.now()
         self.save(session)

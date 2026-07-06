@@ -86,8 +86,8 @@ def handle_session_command(manager, raw):
             print("用法: /session delete <id>")
             return
         try:
-            manager.delete(parts[2])
-            print(f"Deleted session: {parts[2]}")
+            deleted_id = manager.delete(parts[2])
+            print(f"Deleted session: {deleted_id}")
         except SessionError as e:
             print(f"[错误] {e}")
     elif sub == "rename":
@@ -96,8 +96,8 @@ def handle_session_command(manager, raw):
             return
         new_title = " ".join(parts[3:])
         try:
-            manager.rename(parts[2], new_title)
-            print(f"Renamed {parts[2]} -> {new_title}")
+            session = manager.rename(parts[2], new_title)
+            print(f"Renamed {session.session_id} -> {session.title}")
         except SessionError as e:
             print(f"[错误] {e}")
     else:
