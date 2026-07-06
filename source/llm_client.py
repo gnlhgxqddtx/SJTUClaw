@@ -7,7 +7,7 @@ from typing import Optional
 
 from openai import OpenAI
 
-from config import API_BASE_URL, load_api_key, DEFAULT_MODEL
+from .config import API_BASE_URL, load_api_key, DEFAULT_MODEL
 
 
 class LLMClient:
@@ -18,8 +18,8 @@ class LLMClient:
         初始化 LLM 客户端
 
         Args:
-            api_key: API Key，若不提供则从本地文件自动读取
-            model: 模型名称，默认为 glm (GLM-5.1)
+            api_key: API Key，若不提供则从 .env 自动读取
+            model: 模型名称，默认取自 .env 的 LLM_MODEL
         """
         self.api_key = api_key or load_api_key()
         self.model = model
@@ -28,43 +28,35 @@ class LLMClient:
             base_url=API_BASE_URL,
         )
 
-    def chat(self, message: str, system_prompt: str = "你是一个有帮助的助手。") -> str:
+    def chat(self, messages: list[dict]) -> str:
         """
-        发送消息给模型并获取回复
+        发送完整会话历史给模型并获取回复（非流式）
 
         Args:
-            message: 用户消息
-            system_prompt: 系统提示词
+            messages: 消息列表，元素形如 {"role": "user"/"assistant"/"system", "content": str}
 
         Returns:
             模型的回复文本
         """
         response = self.client.chat.completions.create(
             model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": message},
-            ],
+            messages=messages,
         )
         return response.choices[0].message.content
 
-    def chat_stream(self, message: str, system_prompt: str = "你是一个有帮助的助手。"):
+    def chat_stream(self, messages: list[dict]):
         """
-        以流式方式发送消息给模型，逐 token 输出
+        以流式方式发送完整会话历史给模型，逐 token 输出
 
         Args:
-            message: 用户消息
-            system_prompt: 系统提示词
+            messages: 消息列表，元素形如 {"role": ..., "content": ...}
 
         Yields:
             模型回复的文本片段
         """
         stream = self.client.chat.completions.create(
             model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": message},
-            ],
+            messages=messages,
             stream=True,
         )
         for chunk in stream:

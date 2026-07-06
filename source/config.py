@@ -28,6 +28,12 @@ SUPPORTED_MODELS = {
 # 默认使用的模型（可通过 .env 中的 LLM_MODEL 覆盖）
 DEFAULT_MODEL = os.getenv("LLM_MODEL", "glm")
 
+# 会话持久化存储目录（项目根目录下 data/sessions/）
+SESSIONS_DIR = os.path.join(_PROJECT_ROOT, "data", "sessions")
+
+# 默认系统提示词，每轮对话都会置于会话历史最前面发送给模型
+SYSTEM_PROMPT = "你是 DD-SJTUClaw 智能对话助手，请用简洁、友好的方式回答用户。"
+
 
 def load_api_key() -> str:
     """从 .env 文件（环境变量 LLM_API_KEY）加载 API Key"""

@@ -1,0 +1,1 @@
+# 占位文件，保证 data/sessions/ 目录纳入版本库（会话 JSON 文件本身被 .gitignore 忽略）
