@@ -7,7 +7,16 @@ DD-SJTUClaw 交互式命令行入口
 
 import sys
 
-from .config import DEFAULT_MODEL, SESSIONS_DIR, PROMPT_DIR, MEMORY_FILE
+from .compaction import compact, should_compact
+from .config import (
+    COMPACT_MAX_CHARS,
+    COMPACT_MAX_MESSAGES,
+    COMPACT_RECENT_MESSAGES,
+    DEFAULT_MODEL,
+    MEMORY_FILE,
+    PROMPT_DIR,
+    SESSIONS_DIR,
+)
 from .context_builder import build_messages
 from .llm_client import LLMClient
 from .memory_store import MemoryStore, MemoryError
@@ -39,6 +48,7 @@ def print_banner(model, session):
     print("  /session switch - 切换会话")
     print("  /memory list    - 查看长期记忆")
     print("  /memory add     - 添加长期记忆")
+    print("  /compact        - 立即压缩当前会话")
     print("  /help           - 显示帮助")
     print(LINE)
     print(f"📂 当前会话: {session.title} ({session.session_id})")
@@ -57,6 +67,7 @@ def print_help():
     print("  /memory list                 - 列出所有长期记忆")
     print("  /memory add <内容>           - 添加一条长期记忆")
     print("  /memory delete <id>          - 删除指定长期记忆")
+    print("  /compact                     - 立即压缩当前会话的较早消息")
 
 
 def _print_session_list(manager):
@@ -149,11 +160,52 @@ def handle_memory_command(memory_store, raw):
         print(f"未知的 memory 子命令: {sub}（输入 /help 查看帮助）")
 
 
+def _print_compaction_summary(result):
+    print(f"[system] summary:")
+    print(result["summary"])
+
+
+def _maybe_auto_compact(client, session):
+    """一轮对话结束后，若达到阈值则自动压缩当前会话。
+    压缩在内存中就地修改 session；调用方负责随后持久化。"""
+    if not should_compact(session, COMPACT_MAX_MESSAGES, COMPACT_MAX_CHARS):
+        return
+    result = compact(client, session, COMPACT_RECENT_MESSAGES)
+    if result["applied"]:
+        print(f"\n[system] compact session {session.session_id}: "
+              f"old_messages={result['old_count']}, recent_messages={result['recent_count']}")
+        _print_compaction_summary(result)
+    else:
+        # 压缩未应用（失败或摘要无效）：不改动消息，仅提示
+        print(f"\n[system] compaction 跳过（{result['reason']}），本轮消息保持不变。")
+
+
+def handle_compact_command(client, manager):
+    """手动 /compact：立即压缩当前会话，并在应用后持久化。"""
+    session = manager.current
+    result = compact(client, session, COMPACT_RECENT_MESSAGES)
+    print(f"Compacted session {session.session_id}.")
+    print(f"Old messages: {result['old_count']}")
+    print(f"Recent messages: {result['recent_count']}")
+    print(f"Summary updated: {'yes' if result['applied'] else 'no'}")
+    if result["applied"]:
+        print("Summary:")
+        print(result["summary"])
+        try:
+            manager.save(session)
+        except SessionError as e:
+            print(f"[错误] {e}")
+    elif result["reason"]:
+        print(f"（原因: {result['reason']}）")
+
+
 def chat_once(client, manager, stable_prompt, memory_store, user_input):
-    """把用户输入加入历史，连同稳定上下文与完整历史发给模型，流式打印并保存回复。"""
+    """把用户输入加入历史，连同稳定上下文、会话摘要与消息发给模型，流式打印并保存回复。"""
     session = manager.current
     session.add_message("user", user_input)
-    full_messages = build_messages(stable_prompt, memory_store.list(), session.messages)
+    full_messages = build_messages(
+        stable_prompt, memory_store.list(), session.summary, session.messages
+    )
 
     print("[Assistant] ", end="", flush=True)
     reply_parts = []
@@ -164,10 +216,11 @@ def chat_once(client, manager, stable_prompt, memory_store, user_input):
         print()
     except Exception as e:
         print(f"\n[错误] 调用模型失败: {e}")
-        session.messages.pop()  # 回滚本轮用户消息，避免历史中残留无回复的对话
+        session.messages.pop()  # 回滚本轮用户消息，普通调用失败不追加空 assistant 消息
         return
 
     session.add_message("assistant", "".join(reply_parts))
+    _maybe_auto_compact(client, session)
     try:
         manager.save(session)
     except SessionError as e:
@@ -207,6 +260,9 @@ def main():
             continue
         if user_input.startswith("/memory"):
             handle_memory_command(memory_store, user_input)
+            continue
+        if user_input == "/compact":
+            handle_compact_command(client, manager)
             continue
         if user_input.startswith("/"):
             print(f"未知命令: {user_input}（输入 /help 查看帮助）")

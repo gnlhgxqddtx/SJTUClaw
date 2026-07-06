@@ -37,6 +37,15 @@ PROMPT_DIR = os.path.join(_PROJECT_ROOT, "system_prompt")
 # 长期记忆持久化文件（项目根目录下 data/memory.json），跨会话共享
 MEMORY_FILE = os.path.join(_PROJECT_ROOT, "data", "memory.json")
 
+# ===== 上下文压缩（compaction）配置 =====
+# 触发策略：当前 session 的消息条数超过 COMPACT_MAX_MESSAGES，
+# 或所有消息内容的总字符数超过 COMPACT_MAX_CHARS 时，触发一次压缩；
+# 两个条件满足其一即触发，均未超过则不触发。阈值可通过 .env 覆盖。
+COMPACT_MAX_MESSAGES = int(os.getenv("COMPACT_MAX_MESSAGES", "20"))
+COMPACT_MAX_CHARS = int(os.getenv("COMPACT_MAX_CHARS", "4000"))
+# 压缩时保留最近 N 条原始消息，更早的消息合并进 session.summary。
+COMPACT_RECENT_MESSAGES = int(os.getenv("COMPACT_RECENT_MESSAGES", "8"))
+
 
 def load_api_key() -> str:
     """从 .env 文件（环境变量 LLM_API_KEY）加载 API Key"""

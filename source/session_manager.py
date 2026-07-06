@@ -16,12 +16,14 @@ class SessionError(Exception):
 class Session:
     """单个会话的数据模型"""
 
-    def __init__(self, session_id, title, messages=None, created_at=None, updated_at=None):
+    def __init__(self, session_id, title, messages=None, created_at=None, updated_at=None, summary=""):
         self.session_id = session_id
         self.title = title
         self.messages = messages if messages is not None else []
         self.created_at = created_at or datetime.now()
         self.updated_at = updated_at or datetime.now()
+        # summary 属于本 session：由较早消息压缩而来，仅在本 session 内生效，不跨 session 共享
+        self.summary = summary
 
     def add_message(self, role, content):
         """向会话追加一条消息，并刷新更新时间"""
@@ -32,6 +34,7 @@ class Session:
         return {
             "sessionId": self.session_id,
             "title": self.title,
+            "summary": self.summary,
             "messages": self.messages,
             "createdAt": self.created_at.isoformat(),
             "updatedAt": self.updated_at.isoformat(),
@@ -39,13 +42,15 @@ class Session:
 
     @classmethod
     def from_dict(cls, data):
-        """从 JSON 数据构造 Session；字段缺失或格式错误会抛出异常"""
+        """从 JSON 数据构造 Session；字段缺失或格式错误会抛出异常。
+        summary 为 Step 4 新增字段，旧会话文件缺失时按空字符串兼容。"""
         return cls(
             session_id=data["sessionId"],
             title=data["title"],
             messages=data["messages"],
             created_at=datetime.fromisoformat(data["createdAt"]),
             updated_at=datetime.fromisoformat(data["updatedAt"]),
+            summary=data.get("summary", ""),
         )
 
 
