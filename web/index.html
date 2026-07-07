@@ -36,6 +36,31 @@
   #send:disabled { background: #9db8e8; cursor: default; }
   #banner { padding: 8px 18px; background: #fff8e1; color: #8a6d00; font-size: 13px; display: none; }
   .tools-btn { font-size: 12px; color: #3b82f6; cursor: pointer; background: none; border: 1px solid #cbd2dc; border-radius: 6px; padding: 4px 8px; }
+  /* 定时任务模态 */
+  .modal { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: none; align-items: center; justify-content: center; z-index: 10; }
+  .modal.open { display: flex; }
+  .modal-box { background: #fff; width: 720px; max-width: 94vw; max-height: 88vh; border-radius: 10px; display: flex; flex-direction: column; overflow: hidden; }
+  .modal-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #e2e4e8; font-weight: 600; }
+  .modal-head button { border: none; background: none; font-size: 20px; cursor: pointer; color: #888; }
+  .modal-body { padding: 16px; overflow-y: auto; }
+  #task-form { display: grid; gap: 8px; margin-bottom: 16px; padding: 12px; background: #f7f8fa; border-radius: 8px; }
+  #task-form label { font-size: 12px; color: #555; display: block; margin-bottom: 2px; }
+  #task-form textarea, #task-form select, #task-form input { width: 100%; padding: 7px; border: 1px solid #cbd2dc; border-radius: 6px; font-size: 13px; font-family: inherit; }
+  #task-form .row { display: flex; gap: 10px; }
+  #task-form .row > div { flex: 1; }
+  #task-create { padding: 8px; background: #3b82f6; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+  .task-card { border: 1px solid #e2e4e8; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; font-size: 13px; }
+  .task-card .head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .task-card .content { font-weight: 600; word-break: break-word; }
+  .task-card .meta { color: #6b7280; font-size: 12px; margin-top: 4px; line-height: 1.6; }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px; color: #fff; }
+  .badge.pending { background: #f59e0b; } .badge.running { background: #3b82f6; }
+  .badge.done { background: #10b981; } .badge.failed { background: #ef4444; } .badge.cancelled { background: #9ca3af; }
+  .badge.type { background: #6366f1; }
+  .task-cancel { font-size: 12px; color: #ef4444; border: 1px solid #f0b4b4; background: #fff; border-radius: 6px; padding: 3px 8px; cursor: pointer; }
+  .task-hist { margin-top: 6px; border-top: 1px dashed #e2e4e8; padding-top: 6px; font-size: 12px; color: #555; max-height: 140px; overflow-y: auto; }
+  .task-hist .h { margin: 2px 0; white-space: pre-wrap; word-break: break-word; }
+  .task-hist .h.err { color: #b91c1c; }
 </style>
 </head>
 <body>
@@ -49,6 +74,7 @@
       <span id="header-title">（未选择会话）</span>
       <span>
         <input type="file" id="file-input" style="display:none" />
+        <button class="tools-btn" id="task-btn">⏰ 定时任务</button>
         <button class="tools-btn" id="upload-btn">上传附件</button>
       </span>
     </div>
@@ -59,6 +85,52 @@
       <div id="input-row">
         <textarea id="input" rows="2" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
         <button id="send">发送</button>
+      </div>
+    </div>
+  </div>
+  <div id="task-modal" class="modal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <span>⏰ 定时任务</span>
+        <button id="task-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="task-form">
+          <div>
+            <label>任务内容（到期后作为用户消息交给 claw）</label>
+            <textarea id="task-content" rows="2" placeholder="例如：总结一下今天这个 session 的内容"></textarea>
+          </div>
+          <div class="row">
+            <div>
+              <label>所属 session</label>
+              <select id="task-session"></select>
+            </div>
+            <div>
+              <label>触发类型</label>
+              <select id="task-kind">
+                <option value="once">一次性（指定时间点）</option>
+                <option value="interval">周期性 · 固定间隔</option>
+                <option value="daily">周期性 · 每天固定时间</option>
+              </select>
+            </div>
+          </div>
+          <div class="row">
+            <div id="field-once">
+              <label>触发时间</label>
+              <input type="datetime-local" id="task-runat" />
+            </div>
+            <div id="field-interval" style="display:none">
+              <label>间隔（秒）</label>
+              <input type="number" id="task-seconds" min="1" value="3600" />
+            </div>
+            <div id="field-daily" style="display:none">
+              <label>每天时间（HH:MM）</label>
+              <input type="time" id="task-time" value="22:00" />
+            </div>
+          </div>
+          <button type="submit" id="task-create">创建任务</button>
+        </form>
+        <div id="task-list"></div>
       </div>
     </div>
   </div>
@@ -201,6 +273,103 @@ $("file-input").onchange = async (e) => {
   reader.readAsDataURL(file);
   e.target.value = "";
 };
+
+// ---------- 定时任务 ----------
+function scheduleText(t) {
+  const s = t.schedule || {};
+  if (s.kind === "once") return "一次性 @ " + fmtTime(s.runAt);
+  if (s.kind === "interval") return `每 ${s.seconds} 秒`;
+  if (s.kind === "daily") return `每天 ${s.time}`;
+  return JSON.stringify(s);
+}
+function fmtTime(iso) {
+  if (!iso) return "—";
+  return String(iso).replace("T", " ").slice(0, 19);
+}
+
+async function openTaskModal() {
+  // 填充 session 下拉（默认选中当前 session）
+  const data = await api("GET", "/api/sessions");
+  const sel = $("task-session");
+  sel.innerHTML = data.sessions.map((s) =>
+    `<option value="${s.sessionId}">${escapeHtml(s.title)} (${s.sessionId})</option>`).join("");
+  if (state.currentId) sel.value = state.currentId;
+  $("task-modal").classList.add("open");
+  await loadTasks();
+}
+function closeTaskModal() { $("task-modal").classList.remove("open"); }
+
+async function loadTasks() {
+  const data = await api("GET", "/api/tasks");
+  const box = $("task-list");
+  if (!data.tasks.length) { box.innerHTML = "<p style='color:#888'>（暂无定时任务）</p>"; return; }
+  box.innerHTML = "";
+  data.tasks.slice().reverse().forEach((t) => box.appendChild(renderTask(t)));
+}
+
+function renderTask(t) {
+  const card = document.createElement("div");
+  card.className = "task-card";
+  const canCancel = t.status === "pending" || t.status === "running";
+  const hist = (t.history || []).slice(-5).reverse().map((h) => {
+    const cls = h.ok ? "" : " err";
+    const body = h.ok ? (h.reply || "（无回复文本）") : ("失败: " + (h.error || "未知错误"));
+    return `<div class="h${cls}">· ${fmtTime(h.ranAt)} ${escapeHtml(body)}</div>`;
+  }).join("");
+  card.innerHTML = `
+    <div class="head">
+      <span class="content">${escapeHtml(t.content)}</span>
+      <span><span class="badge type">${t.type === "once" ? "一次性" : "周期"}</span>
+        <span class="badge ${t.status}">${t.status}</span></span>
+    </div>
+    <div class="meta">
+      规则：${scheduleText(t)} ｜ 下次触发：${fmtTime(t.nextRunAt)}<br/>
+      所属 session：${t.sessionId} ｜ ${t.id} ｜ 更新：${fmtTime(t.updatedAt)}
+    </div>
+    ${hist ? `<div class="task-hist">${hist}</div>` : ""}
+  `;
+  if (canCancel) {
+    const btn = document.createElement("button");
+    btn.className = "task-cancel";
+    btn.textContent = "取消";
+    btn.onclick = async () => {
+      try { await api("POST", `/api/tasks/${t.id}/cancel`); await loadTasks(); }
+      catch (e) { showBanner("取消失败: " + e.message, true); }
+    };
+    card.querySelector(".head > span:last-child").appendChild(btn);
+  }
+  return card;
+}
+
+function updateTaskFields() {
+  const kind = $("task-kind").value;
+  $("field-once").style.display = kind === "once" ? "" : "none";
+  $("field-interval").style.display = kind === "interval" ? "" : "none";
+  $("field-daily").style.display = kind === "daily" ? "" : "none";
+}
+
+$("task-btn").onclick = () => openTaskModal().catch((e) => showBanner("打开任务面板失败: " + e.message, true));
+$("task-close").onclick = closeTaskModal;
+$("task-modal").addEventListener("click", (e) => { if (e.target.id === "task-modal") closeTaskModal(); });
+$("task-kind").onchange = updateTaskFields;
+$("task-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const content = $("task-content").value.trim();
+  const sessionId = $("task-session").value;
+  const kind = $("task-kind").value;
+  let schedule;
+  if (kind === "once") schedule = { kind: "once", runAt: $("task-runat").value };
+  else if (kind === "interval") schedule = { kind: "interval", seconds: Number($("task-seconds").value) };
+  else schedule = { kind: "daily", time: $("task-time").value };
+  try {
+    await api("POST", "/api/tasks", { content, sessionId, schedule });
+    $("task-content").value = "";
+    await loadTasks();
+    showBanner("任务已创建", false);
+  } catch (err) {
+    showBanner("创建任务失败: " + err.message, true);
+  }
+});
 
 loadSessions().catch((e) => showBanner("加载会话失败: " + e.message, true));
 </script>

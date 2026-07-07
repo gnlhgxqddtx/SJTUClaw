@@ -55,6 +55,12 @@ WEB_DIR = os.path.join(_PROJECT_ROOT, "web")
 # 单个上传附件的大小上限（字节），默认 20MB。
 ATTACHMENT_MAX_BYTES = int(os.getenv("ATTACHMENT_MAX_BYTES", str(20 * 1024 * 1024)))
 
+# ===== Scheduler（Step 7）配置 =====
+# 定时任务持久化文件（项目根目录下 data/scheduler/tasks.json），独立于 session 数据。
+SCHEDULER_TASKS_FILE = os.path.join(_PROJECT_ROOT, "data", "scheduler", "tasks.json")
+# Scheduler 轮询检查任务到期的间隔（秒），可通过 .env 覆盖。
+SCHEDULER_POLL_SECONDS = float(os.getenv("SCHEDULER_POLL_SECONDS", "5"))
+
 
 def load_api_key() -> str:
     """从 .env 文件（环境变量 LLM_API_KEY）加载 API Key"""
