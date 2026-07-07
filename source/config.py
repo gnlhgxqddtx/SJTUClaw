@@ -46,6 +46,15 @@ COMPACT_MAX_CHARS = int(os.getenv("COMPACT_MAX_CHARS", "4000"))
 # 压缩时保留最近 N 条原始消息，更早的消息合并进 session.summary。
 COMPACT_RECENT_MESSAGES = int(os.getenv("COMPACT_RECENT_MESSAGES", "8"))
 
+# ===== Gateway（Step 6）配置 =====
+# Gateway HTTP server 监听地址与端口，可通过 .env 覆盖。
+GATEWAY_HOST = os.getenv("GATEWAY_HOST", "127.0.0.1")
+GATEWAY_PORT = int(os.getenv("GATEWAY_PORT", "8000"))
+# web 图形化入口静态资源目录（项目根目录下 web/）。
+WEB_DIR = os.path.join(_PROJECT_ROOT, "web")
+# 单个上传附件的大小上限（字节），默认 20MB。
+ATTACHMENT_MAX_BYTES = int(os.getenv("ATTACHMENT_MAX_BYTES", str(20 * 1024 * 1024)))
+
 
 def load_api_key() -> str:
     """从 .env 文件（环境变量 LLM_API_KEY）加载 API Key"""

@@ -102,8 +102,8 @@ class AgentRuntime:
                 _emit(on_event, "final", {"content": parsed.content})
                 return parsed.content
 
-            # tool_calls：保存模型的 tool 请求原文，保持历史连贯，再逐个执行
-            session.add_message("assistant", parsed.raw or raw)
+            # tool_calls：保存模型的 tool 请求原文（标记 kind=tool_request 便于 UI 区分 trace），再逐个执行
+            session.add_message("assistant", parsed.raw or raw, kind="tool_request")
             produced_any = True
             for call in parsed.calls:
                 _emit(on_event, "tool_call", {"tool": call["tool"], "args": call["args"]})
@@ -128,3 +128,27 @@ class AgentRuntime:
             return
         result = compact(self.client, session, self.compact_recent)
         _emit(on_event, "compaction", result)
+
+
+def build_runtime():
+    """构造一套完整的 AgentRuntime（client + manager + memory + tool registry + prompt）。
+    CLI、Gateway（Step 6）、Scheduler（Step 7）共用同一构造入口，确保它们进入同一条 runtime 路径。"""
+    from .config import (
+        COMPACT_MAX_CHARS, COMPACT_MAX_MESSAGES, COMPACT_RECENT_MESSAGES,
+        DEFAULT_MODEL, MEMORY_FILE, PROMPT_DIR, SESSIONS_DIR,
+    )
+    from .llm_client import LLMClient
+    from .memory_store import MemoryStore
+    from .prompt_loader import PromptLoader
+    from .session_manager import SessionManager
+    from .tools import build_default_registry
+
+    manager = SessionManager(SESSIONS_DIR)
+    memory_store = MemoryStore(MEMORY_FILE)
+    stable_prompt = PromptLoader(PROMPT_DIR).stable_prompt()
+    client = LLMClient(model=DEFAULT_MODEL)
+    tool_registry = build_default_registry()
+    return AgentRuntime(
+        client, manager, memory_store, tool_registry, stable_prompt,
+        COMPACT_MAX_MESSAGES, COMPACT_MAX_CHARS, COMPACT_RECENT_MESSAGES,
+    )

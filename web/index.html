@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>🐾 DD-SJTUClaw</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: #f4f5f7; color: #222; height: 100vh; display: flex; }
+  #sidebar { width: 260px; background: #1f2430; color: #e6e6e6; display: flex; flex-direction: column; flex-shrink: 0; }
+  #sidebar h1 { font-size: 16px; padding: 16px; margin: 0; border-bottom: 1px solid #333a4a; }
+  #new-session { margin: 10px; padding: 8px; background: #3b82f6; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+  #new-session:hover { background: #2563eb; }
+  #session-list { flex: 1; overflow-y: auto; }
+  .session-item { padding: 10px 14px; cursor: pointer; border-bottom: 1px solid #2a3040; font-size: 13px; }
+  .session-item:hover { background: #2a3040; }
+  .session-item.active { background: #313a4e; border-left: 3px solid #3b82f6; }
+  .session-item .title { font-weight: 600; }
+  .session-item .meta { color: #8a93a6; font-size: 11px; margin-top: 3px; }
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #header { padding: 12px 18px; background: #fff; border-bottom: 1px solid #e2e4e8; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+  #messages { flex: 1; overflow-y: auto; padding: 18px; }
+  .msg { margin-bottom: 14px; display: flex; }
+  .msg.user { justify-content: flex-end; }
+  .bubble { max-width: 72%; padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+  .user .bubble { background: #3b82f6; color: #fff; border-bottom-right-radius: 3px; }
+  .assistant .bubble { background: #fff; border: 1px solid #e2e4e8; border-bottom-left-radius: 3px; }
+  .trace { font-size: 12px; color: #6b7280; background: #eef1f5; border-left: 3px solid #b6c0d0; padding: 6px 10px; margin: 4px 0; border-radius: 4px; white-space: pre-wrap; word-break: break-word; font-family: Consolas, monospace; }
+  .trace.err { border-left-color: #ef4444; color: #b91c1c; background: #fef2f2; }
+  #composer { border-top: 1px solid #e2e4e8; background: #fff; padding: 12px 18px; }
+  #attachments-bar { font-size: 12px; color: #555; margin-bottom: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .att-chip { background: #eef1f5; border-radius: 10px; padding: 2px 8px; }
+  #input-row { display: flex; gap: 8px; }
+  #input { flex: 1; resize: none; padding: 10px; border: 1px solid #cbd2dc; border-radius: 8px; font-size: 14px; font-family: inherit; }
+  #send { padding: 0 20px; background: #3b82f6; color: #fff; border: none; border-radius: 8px; cursor: pointer; }
+  #send:disabled { background: #9db8e8; cursor: default; }
+  #banner { padding: 8px 18px; background: #fff8e1; color: #8a6d00; font-size: 13px; display: none; }
+  .tools-btn { font-size: 12px; color: #3b82f6; cursor: pointer; background: none; border: 1px solid #cbd2dc; border-radius: 6px; padding: 4px 8px; }
+</style>
+</head>
+<body>
+  <div id="sidebar">
+    <h1>🐾 DD-SJTUClaw</h1>
+    <button id="new-session">+ 新建会话</button>
+    <div id="session-list"></div>
+  </div>
+  <div id="main">
+    <div id="header">
+      <span id="header-title">（未选择会话）</span>
+      <span>
+        <input type="file" id="file-input" style="display:none" />
+        <button class="tools-btn" id="upload-btn">上传附件</button>
+      </span>
+    </div>
+    <div id="banner"></div>
+    <div id="messages"></div>
+    <div id="composer">
+      <div id="attachments-bar"><span>附件：</span><span id="att-list">（无）</span></div>
+      <div id="input-row">
+        <textarea id="input" rows="2" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+        <button id="send">发送</button>
+      </div>
+    </div>
+  </div>
+<script>
+const state = { currentId: null };
+const $ = (id) => document.getElementById(id);
+
+function showBanner(text, isError) {
+  const b = $("banner");
+  b.textContent = text;
+  b.style.display = text ? "block" : "none";
+  b.style.background = isError ? "#fef2f2" : "#fff8e1";
+  b.style.color = isError ? "#b91c1c" : "#8a6d00";
+}
+
+async function api(method, url, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+  const res = await fetch(url, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  return data;
+}
+
+async function loadSessions() {
+  const data = await api("GET", "/api/sessions");
+  const list = $("session-list");
+  list.innerHTML = "";
+  data.sessions.forEach((s) => {
+    const div = document.createElement("div");
+    div.className = "session-item" + (s.sessionId === state.currentId ? " active" : "");
+    div.innerHTML = `<div class="title">${escapeHtml(s.title)}</div>
+      <div class="meta">${s.sessionId} · 消息${s.messageCount} · 附件${s.attachmentCount}</div>`;
+    div.onclick = () => selectSession(s.sessionId);
+    list.appendChild(div);
+  });
+  if (!state.currentId && data.sessions.length) selectSession(data.sessions[0].sessionId);
+}
+
+async function selectSession(sid) {
+  state.currentId = sid;
+  showBanner("");
+  await loadSessions();
+  const data = await api("GET", `/api/sessions/${sid}/messages`);
+  $("header-title").textContent = `${data.title}（${sid}）`;
+  const box = $("messages");
+  box.innerHTML = "";
+  data.messages.forEach(renderStored);
+  scrollBottom();
+  await loadAttachments();
+}
+
+function renderStored(m) {
+  if (m.role === "user") return appendBubble("user", m.content);
+  if (m.role === "assistant" && m.kind === "tool_request") return appendTrace("🔧 工具请求: " + m.content, false);
+  if (m.role === "assistant") return appendBubble("assistant", m.content);
+  if (m.role === "tool") return appendTrace(`↳ [${m.tool || "tool"}] ${m.content}`, false);
+}
+
+function appendBubble(role, text) {
+  const box = $("messages");
+  const wrap = document.createElement("div");
+  wrap.className = "msg " + role;
+  const b = document.createElement("div");
+  b.className = "bubble";
+  b.textContent = text;
+  wrap.appendChild(b);
+  box.appendChild(wrap);
+}
+function appendTrace(text, isErr) {
+  const box = $("messages");
+  const d = document.createElement("div");
+  d.className = "trace" + (isErr ? " err" : "");
+  d.textContent = text;
+  box.appendChild(d);
+}
+function scrollBottom() { const b = $("messages"); b.scrollTop = b.scrollHeight; }
+function escapeHtml(s) { return (s || "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+async function loadAttachments() {
+  if (!state.currentId) return;
+  const data = await api("GET", `/api/sessions/${state.currentId}/attachments`);
+  const el = $("att-list");
+  if (!data.attachments.length) { el.textContent = "（无）"; return; }
+  el.innerHTML = data.attachments.map((a) =>
+    `<span class="att-chip">${escapeHtml(a.filename)} · ${a.size}B</span>`).join(" ");
+}
+
+async function sendMessage() {
+  const input = $("input");
+  const text = input.value.trim();
+  if (!text) return;
+  if (!state.currentId) { showBanner("请先创建或选择一个会话", true); return; }
+  input.value = "";
+  $("send").disabled = true;
+  appendBubble("user", text);
+  scrollBottom();
+  try {
+    const data = await api("POST", "/api/chat", { sessionId: state.currentId, message: text });
+    (data.events || []).forEach((ev) => {
+      if (ev.kind === "tool_call") appendTrace(`🔧 调用 ${ev.tool} ${JSON.stringify(ev.args)}`, false);
+      else if (ev.kind === "tool_result") appendTrace(`↳ [${ev.tool}] (${ev.ok ? "ok" : "error"}) ${ev.ok ? ev.output : ev.error}`, !ev.ok);
+      else if (ev.kind === "final") appendBubble("assistant", ev.content);
+      else if (ev.kind === "error") appendTrace("错误: " + ev.message, true);
+    });
+    if (!data.ok && data.reply === null) showBanner("本轮调用失败，请重试", true);
+    await loadSessions();
+  } catch (e) {
+    showBanner("发送失败: " + e.message, true);
+  } finally {
+    $("send").disabled = false;
+    scrollBottom();
+  }
+}
+
+$("send").onclick = sendMessage;
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+$("new-session").onclick = async () => {
+  const data = await api("POST", "/api/sessions", { title: "Web 会话" });
+  state.currentId = data.sessionId;
+  await selectSession(data.sessionId);
+};
+$("upload-btn").onclick = () => $("file-input").click();
+$("file-input").onchange = async (e) => {
+  const file = e.target.files[0];
+  if (!file || !state.currentId) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const b64 = reader.result.split(",")[1];
+    try {
+      await api("POST", `/api/sessions/${state.currentId}/attachments`,
+        { filename: file.name, type: file.type, dataBase64: b64 });
+      await loadAttachments();
+      await loadSessions();
+      showBanner(`附件已上传: ${file.name}`, false);
+    } catch (err) { showBanner("上传失败: " + err.message, true); }
+  };
+  reader.readAsDataURL(file);
+  e.target.value = "";
+};
+
+loadSessions().catch((e) => showBanner("加载会话失败: " + e.message, true));
+</script>
+</body>
+</html>
