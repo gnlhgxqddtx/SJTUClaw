@@ -61,6 +61,14 @@ SCHEDULER_TASKS_FILE = os.path.join(_PROJECT_ROOT, "data", "scheduler", "tasks.j
 # Scheduler 轮询检查任务到期的间隔（秒），可通过 .env 覆盖。
 SCHEDULER_POLL_SECONDS = float(os.getenv("SCHEDULER_POLL_SECONDS", "5"))
 
+# ===== Workspace / Advanced Tool / Approval（Step 8）配置 =====
+# shell tool 单条命令的超时时间（秒）。
+SHELL_TIMEOUT_SECONDS = float(os.getenv("SHELL_TIMEOUT_SECONDS", "30"))
+# shell tool stdout / stderr 各自的展示字符上限，超出则截断。
+SHELL_OUTPUT_MAX_CHARS = int(os.getenv("SHELL_OUTPUT_MAX_CHARS", "20000"))
+# approval 等待用户决定的超时时间（秒），超时按拒绝处理，避免请求永久阻塞。
+APPROVAL_TIMEOUT_SECONDS = float(os.getenv("APPROVAL_TIMEOUT_SECONDS", "300"))
+
 
 def load_api_key() -> str:
     """从 .env 文件（环境变量 LLM_API_KEY）加载 API Key"""

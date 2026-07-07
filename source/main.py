@@ -8,22 +8,12 @@ DD-SJTUClaw 交互式命令行入口
 import json
 import sys
 
-from .agent import AgentRuntime
+from .agent import build_runtime
 from .compaction import compact
-from .config import (
-    COMPACT_MAX_CHARS,
-    COMPACT_MAX_MESSAGES,
-    COMPACT_RECENT_MESSAGES,
-    DEFAULT_MODEL,
-    MEMORY_FILE,
-    PROMPT_DIR,
-    SESSIONS_DIR,
-)
-from .llm_client import LLMClient
-from .memory_store import MemoryStore, MemoryError
-from .prompt_loader import PromptLoader
-from .session_manager import SessionManager, SessionError
-from .tools import build_default_registry
+from .config import COMPACT_RECENT_MESSAGES, DEFAULT_MODEL
+from .memory_store import MemoryError
+from .session_manager import SessionError
+from .workspace import WorkspaceError, normalize_workspace
 
 SEP = "=" * 60
 LINE = "-" * 60
@@ -50,11 +40,15 @@ def print_banner(model, session):
     print("  /session switch - 切换会话")
     print("  /memory list    - 查看长期记忆")
     print("  /memory add     - 添加长期记忆")
+    print("  /workspace show - 查看当前 workspace")
+    print("  /workspace set  - 设置 workspace 目录")
     print("  /compact        - 立即压缩当前会话")
     print("  /help           - 显示帮助")
     print(LINE)
     print(f"📂 当前会话: {session.title} ({session.session_id})")
     print(f"📝 消息数: {len(session.messages)}")
+    ws = getattr(session, "workspace", None)
+    print(f"🗂️  workspace: {ws if ws else '（未设置）'}")
 
 
 def print_help():
@@ -69,6 +63,8 @@ def print_help():
     print("  /memory list                 - 列出所有长期记忆")
     print("  /memory add <内容>           - 添加一条长期记忆")
     print("  /memory delete <id>          - 删除指定长期记忆")
+    print("  /workspace show              - 查看当前会话的 workspace")
+    print("  /workspace set <path>        - 设置当前会话的 workspace 目录")
     print("  /compact                     - 立即压缩当前会话的较早消息")
 
 
@@ -162,6 +158,34 @@ def handle_memory_command(memory_store, raw):
         print(f"未知的 memory 子命令: {sub}（输入 /help 查看帮助）")
 
 
+def handle_workspace_command(manager, raw):
+    """/workspace show | set <path>：查看或设置当前会话可操作的项目目录。"""
+    parts = raw.split(maxsplit=2)
+    sub = parts[1] if len(parts) >= 2 else "show"
+    session = manager.current
+    if sub == "show":
+        ws = getattr(session, "workspace", None)
+        print(f"workspace: {ws if ws else '（未设置）'}")
+    elif sub == "set":
+        if len(parts) < 3 or not parts[2].strip():
+            print("用法: /workspace set <path>")
+            return
+        try:
+            ws = normalize_workspace(parts[2])
+        except WorkspaceError as e:
+            print(f"[错误] {e}")
+            return
+        session.workspace = ws
+        try:
+            manager.save(session)
+        except SessionError as e:
+            print(f"[错误] 保存会话失败: {e}")
+            return
+        print(f"workspace 已设置为: {ws}")
+    else:
+        print(f"未知的 workspace 子命令: {sub}（用法: /workspace show | set <path>）")
+
+
 def _print_compaction_summary(result):
     print(f"[system] summary:")
     print(result["summary"])
@@ -190,6 +214,13 @@ def _cli_event_printer(kind, data):
     """把 agent loop 的过程事件打印到 CLI，便于观察 tool 调用与结果。"""
     if kind == "tool_call":
         print(f"[tool_call] {data['tool']} {json.dumps(data['args'], ensure_ascii=False)}")
+    elif kind == "approval":
+        # 审批请求即将进入 _cli_approval 阻塞询问，这里只提示。
+        print(f"[approval] 需要确认：{data['tool']}（{data.get('safety', '')}）")
+    elif kind == "approval_result":
+        verb = "已批准" if data["approved"] else "已拒绝"
+        reason = f"，原因: {data['reason']}" if data.get("reason") else ""
+        print(f"[approval_result] {data['tool']} {verb}{reason}")
     elif kind == "tool_result":
         status = "ok" if data["ok"] else "error"
         text = data["output"] if data["ok"] else data["error"]
@@ -208,24 +239,37 @@ def _cli_event_printer(kind, data):
             print(f"\n[system] compaction 跳过（{data.get('reason', '')}），本轮消息保持不变。")
 
 
+def _cli_approval(tool, args):
+    """CLI 侧的同步审批：写/命令类 tool 执行前询问用户 y/N，返回 (approved, reason)。
+    非 y/yes 一律视为拒绝；拒绝时可选填原因，作为 observation 反馈给模型。"""
+    print(f"\n[需要审批] 模型请求执行 {tool}")
+    print(f"  参数: {json.dumps(args, ensure_ascii=False)}")
+    try:
+        ans = input("  是否允许执行？(y/N) ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return (False, "用户取消了审批。")
+    if ans in ("y", "yes"):
+        return (True, "")
+    try:
+        reason = input("  拒绝原因（可留空，回车跳过）: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        reason = ""
+    return (False, reason or "用户未批准该操作。")
+
+
 def chat_once(runtime, user_input):
-    """通过统一 agent runtime 处理一轮对话（含 tool loop、压缩与持久化）。"""
+    """通过统一 agent runtime 处理一轮对话（含 tool loop、审批、压缩与持久化）。"""
     session = runtime.manager.current
-    runtime.run(session, user_input, on_event=_cli_event_printer)
+    runtime.run(session, user_input, on_event=_cli_event_printer, approval_fn=_cli_approval)
 
 
 def main():
     _reconfigure_io()
     try:
-        manager = SessionManager(SESSIONS_DIR)
-        memory_store = MemoryStore(MEMORY_FILE)
-        stable_prompt = PromptLoader(PROMPT_DIR).stable_prompt()
-        client = LLMClient(model=DEFAULT_MODEL)
-        tool_registry = build_default_registry()
-        runtime = AgentRuntime(
-            client, manager, memory_store, tool_registry, stable_prompt,
-            COMPACT_MAX_MESSAGES, COMPACT_MAX_CHARS, COMPACT_RECENT_MESSAGES,
-        )
+        runtime = build_runtime()
+        manager = runtime.manager
+        memory_store = runtime.memory_store
+        client = runtime.client
     except Exception as e:
         print(f"[启动失败] {e}")
         return 1
@@ -252,6 +296,9 @@ def main():
             continue
         if user_input.startswith("/memory"):
             handle_memory_command(memory_store, user_input)
+            continue
+        if user_input.startswith("/workspace"):
+            handle_workspace_command(manager, user_input)
             continue
         if user_input == "/compact":
             handle_compact_command(client, manager)

@@ -33,13 +33,18 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
+from .approval import ApprovalError, ApprovalManager
 from .attachments import AttachmentError
+from .config import APPROVAL_TIMEOUT_SECONDS
 from .scheduler import SchedulerError
+from .workspace import WorkspaceError, normalize_workspace
 
 _RE_MESSAGES = re.compile(r"^/api/sessions/([^/]+)/messages$")
 _RE_ATTACH = re.compile(r"^/api/sessions/([^/]+)/attachments$")
+_RE_WORKSPACE = re.compile(r"^/api/sessions/([^/]+)/workspace$")
 _RE_TASK = re.compile(r"^/api/tasks/([^/]+)$")
 _RE_TASK_CANCEL = re.compile(r"^/api/tasks/([^/]+)/cancel$")
+_RE_APPROVAL_DECIDE = re.compile(r"^/api/approvals/([^/]+)/decide$")
 
 # 单条 event 中 tool 输出的展示上限，避免响应体过大。
 _EVENT_TEXT_CAP = 2000
@@ -67,6 +72,9 @@ class Gateway:
         self.downloads = download_registry
         # scheduler 供 Step 7 的定时任务管理使用；单独作为 CLI/测试时可为 None
         self.scheduler = scheduler
+        # approvals 供 Step 8：agent 执行 write/shell tool 前创建审批请求并阻塞等待，
+        # 前端轮询 /api/approvals 发现待审批项并 POST 决定。
+        self.approvals = ApprovalManager(timeout=APPROVAL_TIMEOUT_SECONDS)
         # 串行化 agent 执行与会话写入：本地单用户场景，用一把全局锁即可保证线程安全。
         # run_lock 由外部传入时，可与 Scheduler 共用同一把锁，串行化“聊天”与“定时任务”对 session 的写入。
         self.lock = run_lock or threading.Lock()
@@ -136,8 +144,15 @@ class Gateway:
                     trimmed[key] = v[:_EVENT_TEXT_CAP] + " ...(已截断)"
             events.append({"kind": kind, **trimmed})
 
+        def approval_fn(tool, args):
+            # 创建待审批记录并阻塞等待前端决定。chat 请求此刻持有 self.lock，
+            # 但 decide / list_pending 都不需要该锁，故前端可正常轮询并决定，不会死锁。
+            rec = self.approvals.create(session.session_id, tool, args)
+            return self.approvals.wait(rec["approvalId"])
+
         with self.lock:
-            reply = self.runtime.run(session, message.strip(), on_event=on_event)
+            reply = self.runtime.run(session, message.strip(),
+                                     on_event=on_event, approval_fn=approval_fn)
 
         return {
             "ok": reply is not None,
@@ -145,6 +160,35 @@ class Gateway:
             "reply": reply,
             "events": events,
         }
+
+    # ---------- workspace（Step 8）----------
+    def get_workspace(self, sid):
+        session = self._resolve_session(sid)
+        return {"sessionId": session.session_id, "workspace": getattr(session, "workspace", None)}
+
+    def set_workspace(self, sid, body):
+        session = self._resolve_session(sid)
+        try:
+            ws = normalize_workspace(body.get("path"))
+        except WorkspaceError as e:
+            raise GatewayError(400, str(e))
+        with self.lock:
+            session.workspace = ws
+            self.manager.save(session)
+        return {"sessionId": session.session_id, "workspace": ws}
+
+    # ---------- approval（Step 8）----------
+    def list_approvals(self):
+        return {"approvals": self.approvals.list_pending()}
+
+    def decide_approval(self, approval_id, body):
+        approved = bool(body.get("approved"))
+        reason = body.get("reason", "")
+        try:
+            rec = self.approvals.decide(approval_id, approved, reason)
+        except ApprovalError as e:
+            raise GatewayError(400, str(e))
+        return {"approval": rec}
 
     # ---------- 附件 ----------
     def list_attachments(self, sid):
@@ -293,6 +337,11 @@ def _make_handler(gateway):
                 elif _RE_TASK.match(path):
                     tid = _RE_TASK.match(path).group(1)
                     self._send_json(200, gateway.get_task(tid))
+                elif path == "/api/approvals":
+                    self._send_json(200, gateway.list_approvals())
+                elif _RE_WORKSPACE.match(path):
+                    sid = _RE_WORKSPACE.match(path).group(1)
+                    self._send_json(200, gateway.get_workspace(sid))
                 elif gateway.downloads is not None and gateway.downloads.handle_get(self, path):
                     return  # 由下载注册表处理（Step 8）
                 else:
@@ -315,6 +364,14 @@ def _make_handler(gateway):
                     sid = _RE_ATTACH.match(path).group(1)
                     body = self._read_json()
                     self._send_json(200, gateway.upload_attachment(sid, body))
+                elif _RE_WORKSPACE.match(path):
+                    sid = _RE_WORKSPACE.match(path).group(1)
+                    body = self._read_json()
+                    self._send_json(200, gateway.set_workspace(sid, body))
+                elif _RE_APPROVAL_DECIDE.match(path):
+                    aid = _RE_APPROVAL_DECIDE.match(path).group(1)
+                    body = self._read_json()
+                    self._send_json(200, gateway.decide_approval(aid, body))
                 elif path == "/api/tasks":
                     body = self._read_json()
                     self._send_json(200, gateway.create_task(body))
@@ -339,10 +396,9 @@ def main():
     from pathlib import Path
 
     from .agent import build_runtime
-    from .attachments import AttachmentStore
     from .config import (
-        ATTACHMENT_MAX_BYTES, GATEWAY_HOST, GATEWAY_PORT,
-        SCHEDULER_POLL_SECONDS, SCHEDULER_TASKS_FILE, SESSIONS_DIR, WEB_DIR,
+        GATEWAY_HOST, GATEWAY_PORT,
+        SCHEDULER_POLL_SECONDS, SCHEDULER_TASKS_FILE, WEB_DIR,
     )
     from .scheduler import Scheduler, TaskStore
 
@@ -358,13 +414,16 @@ def main():
         print(f"[启动失败] {e}")
         return 1
 
-    attachment_store = AttachmentStore(SESSIONS_DIR, ATTACHMENT_MAX_BYTES)
+    # 复用 runtime 内已构造的附件存储 / 下载注册表，保证 Gateway 上传的附件与
+    # copy_attachment_to_workspace tool、create_download 下载入口作用于同一套对象。
+    attachment_store = runtime.attachment_store
     # 共享执行锁：Gateway 的聊天请求与 Scheduler 的定时任务都通过它串行进入 agent loop，
     # 避免并发写坏同一个 session。
     run_lock = threading.Lock()
     task_store = TaskStore(SCHEDULER_TASKS_FILE)
     scheduler = Scheduler(task_store, runtime, run_lock, poll_seconds=SCHEDULER_POLL_SECONDS)
     gateway = Gateway(runtime, attachment_store, Path(WEB_DIR),
+                      download_registry=runtime.download_registry,
                       scheduler=scheduler, run_lock=run_lock)
 
     scheduler.start()

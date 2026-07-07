@@ -17,7 +17,7 @@ class Session:
     """单个会话的数据模型"""
 
     def __init__(self, session_id, title, messages=None, created_at=None, updated_at=None,
-                 summary="", attachments=None):
+                 summary="", attachments=None, workspace=None):
         self.session_id = session_id
         self.title = title
         self.messages = messages if messages is not None else []
@@ -27,6 +27,8 @@ class Session:
         self.summary = summary
         # attachments 属于本 session：每项为附件 metadata（不含文件内容），与 session 绑定、彼此隔离
         self.attachments = attachments if attachments is not None else []
+        # workspace 属于本 session（Step 8）：agent 可操作的项目目录绝对路径；未设置为 None
+        self.workspace = workspace
 
     def add_message(self, role, content, **extra):
         """向会话追加一条消息，并刷新更新时间。
@@ -43,6 +45,7 @@ class Session:
             "summary": self.summary,
             "messages": self.messages,
             "attachments": self.attachments,
+            "workspace": self.workspace,
             "createdAt": self.created_at.isoformat(),
             "updatedAt": self.updated_at.isoformat(),
         }
@@ -50,7 +53,7 @@ class Session:
     @classmethod
     def from_dict(cls, data):
         """从 JSON 数据构造 Session；字段缺失或格式错误会抛出异常。
-        summary / attachments 为后续 Step 新增字段，旧会话文件缺失时按空值兼容。"""
+        summary / attachments / workspace 为后续 Step 新增字段，旧会话文件缺失时按空值兼容。"""
         return cls(
             session_id=data["sessionId"],
             title=data["title"],
@@ -59,6 +62,7 @@ class Session:
             updated_at=datetime.fromisoformat(data["updatedAt"]),
             summary=data.get("summary", ""),
             attachments=data.get("attachments", []),
+            workspace=data.get("workspace"),
         )
 
 

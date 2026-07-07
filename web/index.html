@@ -27,6 +27,19 @@
   .assistant .bubble { background: #fff; border: 1px solid #e2e4e8; border-bottom-left-radius: 3px; }
   .trace { font-size: 12px; color: #6b7280; background: #eef1f5; border-left: 3px solid #b6c0d0; padding: 6px 10px; margin: 4px 0; border-radius: 4px; white-space: pre-wrap; word-break: break-word; font-family: Consolas, monospace; }
   .trace.err { border-left-color: #ef4444; color: #b91c1c; background: #fef2f2; }
+  .dl-link { display: inline-block; margin: 4px 0; font-size: 12px; color: #2563eb; text-decoration: none; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 4px 10px; }
+  .dl-link:hover { background: #dbeafe; }
+  .approval-card { border: 1px solid #f0b400; background: #fffbeb; border-radius: 8px; padding: 10px 12px; margin: 8px 0; font-size: 13px; }
+  .approval-card .ap-title { font-weight: 600; color: #92600a; }
+  .approval-card .ap-args { font-family: Consolas, monospace; font-size: 12px; color: #555; background: #fff; border: 1px solid #f0e2b8; border-radius: 6px; padding: 6px 8px; margin: 6px 0; white-space: pre-wrap; word-break: break-word; }
+  .approval-card .ap-reason { width: 100%; padding: 6px; border: 1px solid #e2c98a; border-radius: 6px; font-size: 12px; font-family: inherit; margin-bottom: 6px; }
+  .approval-card .ap-actions { display: flex; gap: 8px; }
+  .approval-card button { border: none; border-radius: 6px; padding: 5px 14px; cursor: pointer; font-size: 12px; }
+  .ap-approve { background: #10b981; color: #fff; } .ap-reject { background: #ef4444; color: #fff; }
+  .approval-card.done { opacity: .6; }
+  #workspace-bar { padding: 6px 18px; background: #f0f4ff; border-bottom: 1px solid #dbe4ff; font-size: 12px; color: #334; display: flex; align-items: center; gap: 8px; }
+  #workspace-bar code { background: #fff; border: 1px solid #cdd8f0; border-radius: 4px; padding: 1px 6px; }
+  #ws-set { font-size: 12px; color: #3b82f6; cursor: pointer; background: none; border: 1px solid #cbd2dc; border-radius: 6px; padding: 3px 8px; }
   #composer { border-top: 1px solid #e2e4e8; background: #fff; padding: 12px 18px; }
   #attachments-bar { font-size: 12px; color: #555; margin-bottom: 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .att-chip { background: #eef1f5; border-radius: 10px; padding: 2px 8px; }
@@ -77,6 +90,10 @@
         <button class="tools-btn" id="task-btn">⏰ 定时任务</button>
         <button class="tools-btn" id="upload-btn">上传附件</button>
       </span>
+    </div>
+    <div id="workspace-bar">
+      <span>🗂️ workspace：</span><code id="ws-value">（未设置）</code>
+      <button id="ws-set">设置 / 修改</button>
     </div>
     <div id="banner"></div>
     <div id="messages"></div>
@@ -135,7 +152,7 @@
     </div>
   </div>
 <script>
-const state = { currentId: null };
+const state = { currentId: null, workspace: null, shownApprovals: new Set() };
 const $ = (id) => document.getElementById(id);
 
 function showBanner(text, isError) {
@@ -181,6 +198,33 @@ async function selectSession(sid) {
   data.messages.forEach(renderStored);
   scrollBottom();
   await loadAttachments();
+  await loadWorkspace();
+}
+
+async function loadWorkspace() {
+  if (!state.currentId) return;
+  try {
+    const data = await api("GET", `/api/sessions/${state.currentId}/workspace`);
+    state.workspace = data.workspace || null;
+  } catch (e) {
+    state.workspace = null;
+  }
+  $("ws-value").textContent = state.workspace || "（未设置）";
+}
+
+async function setWorkspace() {
+  if (!state.currentId) { showBanner("请先选择会话", true); return; }
+  const path = window.prompt("设置 workspace 目录（agent 可操作的项目目录绝对路径）：",
+    state.workspace || "");
+  if (path === null) return;
+  try {
+    const data = await api("POST", `/api/sessions/${state.currentId}/workspace`, { path });
+    state.workspace = data.workspace;
+    $("ws-value").textContent = data.workspace;
+    showBanner("workspace 已设置为 " + data.workspace, false);
+  } catch (e) {
+    showBanner("设置 workspace 失败: " + e.message, true);
+  }
 }
 
 function renderStored(m) {
@@ -228,11 +272,20 @@ async function sendMessage() {
   $("send").disabled = true;
   appendBubble("user", text);
   scrollBottom();
+  // agent loop 遇到写/命令类 tool 时会在服务端阻塞等待审批；这里在请求进行期间
+  // 轮询 /api/approvals，把待审批项渲染成审批卡片，让用户批准/拒绝以解除阻塞。
+  const poll = setInterval(pollApprovals, 1000);
   try {
     const data = await api("POST", "/api/chat", { sessionId: state.currentId, message: text });
     (data.events || []).forEach((ev) => {
       if (ev.kind === "tool_call") appendTrace(`🔧 调用 ${ev.tool} ${JSON.stringify(ev.args)}`, false);
-      else if (ev.kind === "tool_result") appendTrace(`↳ [${ev.tool}] (${ev.ok ? "ok" : "error"}) ${ev.ok ? ev.output : ev.error}`, !ev.ok);
+      else if (ev.kind === "approval_result")
+        appendTrace(`🔐 审批 ${ev.tool}：${ev.approved ? "已批准" : "已拒绝"}${ev.reason ? "（" + ev.reason + "）" : ""}`, !ev.approved);
+      else if (ev.kind === "tool_result") {
+        appendTrace(`↳ [${ev.tool}] (${ev.ok ? "ok" : "error"}) ${ev.ok ? ev.output : ev.error}`, !ev.ok);
+        if (ev.ok && ev.extra && ev.extra.downloadUrl)
+          appendDownload(ev.extra.downloadUrl, ev.extra.filename || "下载文件");
+      }
       else if (ev.kind === "final") appendBubble("assistant", ev.content);
       else if (ev.kind === "error") appendTrace("错误: " + ev.message, true);
     });
@@ -241,9 +294,74 @@ async function sendMessage() {
   } catch (e) {
     showBanner("发送失败: " + e.message, true);
   } finally {
+    clearInterval(poll);
     $("send").disabled = false;
     scrollBottom();
   }
+}
+
+async function pollApprovals() {
+  let data;
+  try {
+    data = await api("GET", "/api/approvals");
+  } catch (e) {
+    return;  // 轮询失败静默重试，不打断聊天
+  }
+  (data.approvals || []).forEach((rec) => {
+    if (rec.sessionId !== state.currentId) return;
+    if (state.shownApprovals.has(rec.approvalId)) return;
+    state.shownApprovals.add(rec.approvalId);
+    renderApproval(rec);
+  });
+}
+
+function renderApproval(rec) {
+  const box = $("messages");
+  const card = document.createElement("div");
+  card.className = "approval-card";
+  card.innerHTML = `
+    <div class="ap-title">🔐 需要审批：${escapeHtml(rec.tool)}</div>
+    <div class="ap-args">${escapeHtml(JSON.stringify(rec.args, null, 2))}</div>
+    <input class="ap-reason" placeholder="拒绝原因（可选，会反馈给模型）" />
+    <div class="ap-actions">
+      <button class="ap-approve">批准执行</button>
+      <button class="ap-reject">拒绝</button>
+    </div>`;
+  const reasonInput = card.querySelector(".ap-reason");
+  const finish = (approved) => {
+    const reason = reasonInput.value.trim();
+    card.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    decideApproval(rec.approvalId, approved, reason, card);
+  };
+  card.querySelector(".ap-approve").onclick = () => finish(true);
+  card.querySelector(".ap-reject").onclick = () => finish(false);
+  box.appendChild(card);
+  scrollBottom();
+}
+
+async function decideApproval(approvalId, approved, reason, card) {
+  try {
+    await api("POST", `/api/approvals/${approvalId}/decide`, { approved, reason });
+    card.classList.add("done");
+    const tip = document.createElement("div");
+    tip.style.marginTop = "6px";
+    tip.style.color = approved ? "#065f46" : "#991b1b";
+    tip.textContent = approved ? "已批准，继续执行。" : "已拒绝。" + (reason ? "原因：" + reason : "");
+    card.appendChild(tip);
+  } catch (e) {
+    card.querySelectorAll("button").forEach((b) => (b.disabled = false));
+    showBanner("提交审批决定失败: " + e.message, true);
+  }
+}
+
+function appendDownload(url, filename) {
+  const box = $("messages");
+  const a = document.createElement("a");
+  a.className = "dl-link";
+  a.href = url;
+  a.setAttribute("download", "");
+  a.textContent = "⬇ 下载 " + filename;
+  box.appendChild(a);
 }
 
 $("send").onclick = sendMessage;
@@ -256,6 +374,7 @@ $("new-session").onclick = async () => {
   await selectSession(data.sessionId);
 };
 $("upload-btn").onclick = () => $("file-input").click();
+$("ws-set").onclick = () => setWorkspace();
 $("file-input").onchange = async (e) => {
   const file = e.target.files[0];
   if (!file || !state.currentId) return;
