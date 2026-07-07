@@ -16,36 +16,64 @@ class SessionError(Exception):
 class Session:
     """单个会话的数据模型"""
 
-    def __init__(self, session_id, title, messages=None, created_at=None, updated_at=None):
+    def __init__(self, session_id, title, messages=None, created_at=None, updated_at=None,
+                 summary="", attachments=None, workspace=None, skill_usages=None):
         self.session_id = session_id
         self.title = title
         self.messages = messages if messages is not None else []
         self.created_at = created_at or datetime.now()
         self.updated_at = updated_at or datetime.now()
+        # summary 属于本 session：由较早消息压缩而来，仅在本 session 内生效，不跨 session 共享
+        self.summary = summary
+        # attachments 属于本 session：每项为附件 metadata（不含文件内容），与 session 绑定、彼此隔离
+        self.attachments = attachments if attachments is not None else []
+        # workspace 属于本 session（Step 8）：agent 可操作的项目目录绝对路径；未设置为 None
+        self.workspace = workspace
+        # skill_usages 属于本 session（Step 9）：本会话内的 skill 使用记录，每项形如
+        # {skill, sessionId, task, source(explicit/auto), reason, usedAt, output}
+        self.skill_usages = skill_usages if skill_usages is not None else []
 
-    def add_message(self, role, content):
-        """向会话追加一条消息，并刷新更新时间"""
-        self.messages.append({"role": role, "content": content})
+    def add_message(self, role, content, **extra):
+        """向会话追加一条消息，并刷新更新时间。
+        extra 用于携带 trace 元数据（如 tool 名称），会一并持久化，但不发送给 LLM API。"""
+        message = {"role": role, "content": content}
+        message.update(extra)
+        self.messages.append(message)
+        self.updated_at = datetime.now()
+
+    def add_skill_usage(self, record):
+        """记录一次 skill 使用（Step 9），并刷新更新时间。record 为 dict。"""
+        self.skill_usages.append(record)
         self.updated_at = datetime.now()
 
     def to_dict(self):
         return {
             "sessionId": self.session_id,
             "title": self.title,
+            "summary": self.summary,
             "messages": self.messages,
+            "attachments": self.attachments,
+            "workspace": self.workspace,
+            "skillUsages": self.skill_usages,
             "createdAt": self.created_at.isoformat(),
             "updatedAt": self.updated_at.isoformat(),
         }
 
     @classmethod
     def from_dict(cls, data):
-        """从 JSON 数据构造 Session；字段缺失或格式错误会抛出异常"""
+        """从 JSON 数据构造 Session；字段缺失或格式错误会抛出异常。
+        summary / attachments / workspace / skillUsages 为后续 Step 新增字段，
+        旧会话文件缺失时按空值兼容。"""
         return cls(
             session_id=data["sessionId"],
             title=data["title"],
             messages=data["messages"],
             created_at=datetime.fromisoformat(data["createdAt"]),
             updated_at=datetime.fromisoformat(data["updatedAt"]),
+            summary=data.get("summary", ""),
+            attachments=data.get("attachments", []),
+            workspace=data.get("workspace"),
+            skill_usages=data.get("skillUsages", []),
         )
 
 
