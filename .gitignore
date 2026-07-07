@@ -62,6 +62,9 @@ data/sessions/*.json
 # ===== 长期记忆数据（本地运行产生，不纳入版本库）=====
 data/memory.json
 
+# ===== 定时任务数据（本地运行产生，不纳入版本库）=====
+data/scheduler/
+
 # ===== 提示词配置（本地个性化，不纳入版本库；仅保留 .example 模板）=====
 system_prompt/*
 !system_prompt/*.example.md
