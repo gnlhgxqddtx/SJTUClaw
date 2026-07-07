@@ -5,9 +5,11 @@ DD-SJTUClaw 交互式命令行入口
 启动: python -m source.main
 """
 
+import json
 import sys
 
-from .compaction import compact, should_compact
+from .agent import AgentRuntime
+from .compaction import compact
 from .config import (
     COMPACT_MAX_CHARS,
     COMPACT_MAX_MESSAGES,
@@ -17,11 +19,11 @@ from .config import (
     PROMPT_DIR,
     SESSIONS_DIR,
 )
-from .context_builder import build_messages
 from .llm_client import LLMClient
 from .memory_store import MemoryStore, MemoryError
 from .prompt_loader import PromptLoader
 from .session_manager import SessionManager, SessionError
+from .tools import build_default_registry
 
 SEP = "=" * 60
 LINE = "-" * 60
@@ -165,21 +167,6 @@ def _print_compaction_summary(result):
     print(result["summary"])
 
 
-def _maybe_auto_compact(client, session):
-    """一轮对话结束后，若达到阈值则自动压缩当前会话。
-    压缩在内存中就地修改 session；调用方负责随后持久化。"""
-    if not should_compact(session, COMPACT_MAX_MESSAGES, COMPACT_MAX_CHARS):
-        return
-    result = compact(client, session, COMPACT_RECENT_MESSAGES)
-    if result["applied"]:
-        print(f"\n[system] compact session {session.session_id}: "
-              f"old_messages={result['old_count']}, recent_messages={result['recent_count']}")
-        _print_compaction_summary(result)
-    else:
-        # 压缩未应用（失败或摘要无效）：不改动消息，仅提示
-        print(f"\n[system] compaction 跳过（{result['reason']}），本轮消息保持不变。")
-
-
 def handle_compact_command(client, manager):
     """手动 /compact：立即压缩当前会话，并在应用后持久化。"""
     session = manager.current
@@ -199,32 +186,32 @@ def handle_compact_command(client, manager):
         print(f"（原因: {result['reason']}）")
 
 
-def chat_once(client, manager, stable_prompt, memory_store, user_input):
-    """把用户输入加入历史，连同稳定上下文、会话摘要与消息发给模型，流式打印并保存回复。"""
-    session = manager.current
-    session.add_message("user", user_input)
-    full_messages = build_messages(
-        stable_prompt, memory_store.list(), session.summary, session.messages
-    )
+def _cli_event_printer(kind, data):
+    """把 agent loop 的过程事件打印到 CLI，便于观察 tool 调用与结果。"""
+    if kind == "tool_call":
+        print(f"[tool_call] {data['tool']} {json.dumps(data['args'], ensure_ascii=False)}")
+    elif kind == "tool_result":
+        status = "ok" if data["ok"] else "error"
+        text = data["output"] if data["ok"] else data["error"]
+        preview = text if len(text) <= 500 else text[:500] + " ...(已截断)"
+        print(f"[tool_result] {data['tool']} ({status}) {preview}")
+    elif kind == "final":
+        print(f"[Assistant] {data['content']}")
+    elif kind == "error":
+        print(f"[错误] {data['message']}")
+    elif kind == "compaction":
+        if data.get("applied"):
+            print(f"\n[system] compact: old_messages={data['old_count']}, "
+                  f"recent_messages={data['recent_count']}")
+            _print_compaction_summary(data)
+        else:
+            print(f"\n[system] compaction 跳过（{data.get('reason', '')}），本轮消息保持不变。")
 
-    print("[Assistant] ", end="", flush=True)
-    reply_parts = []
-    try:
-        for chunk in client.chat_stream(full_messages):
-            print(chunk, end="", flush=True)
-            reply_parts.append(chunk)
-        print()
-    except Exception as e:
-        print(f"\n[错误] 调用模型失败: {e}")
-        session.messages.pop()  # 回滚本轮用户消息，普通调用失败不追加空 assistant 消息
-        return
 
-    session.add_message("assistant", "".join(reply_parts))
-    _maybe_auto_compact(client, session)
-    try:
-        manager.save(session)
-    except SessionError as e:
-        print(f"[错误] {e}")
+def chat_once(runtime, user_input):
+    """通过统一 agent runtime 处理一轮对话（含 tool loop、压缩与持久化）。"""
+    session = runtime.manager.current
+    runtime.run(session, user_input, on_event=_cli_event_printer)
 
 
 def main():
@@ -234,6 +221,11 @@ def main():
         memory_store = MemoryStore(MEMORY_FILE)
         stable_prompt = PromptLoader(PROMPT_DIR).stable_prompt()
         client = LLMClient(model=DEFAULT_MODEL)
+        tool_registry = build_default_registry()
+        runtime = AgentRuntime(
+            client, manager, memory_store, tool_registry, stable_prompt,
+            COMPACT_MAX_MESSAGES, COMPACT_MAX_CHARS, COMPACT_RECENT_MESSAGES,
+        )
     except Exception as e:
         print(f"[启动失败] {e}")
         return 1
@@ -268,7 +260,7 @@ def main():
             print(f"未知命令: {user_input}（输入 /help 查看帮助）")
             continue
 
-        chat_once(client, manager, stable_prompt, memory_store, user_input)
+        chat_once(runtime, user_input)
 
     return 0
 

@@ -25,9 +25,12 @@ class Session:
         # summary 属于本 session：由较早消息压缩而来，仅在本 session 内生效，不跨 session 共享
         self.summary = summary
 
-    def add_message(self, role, content):
-        """向会话追加一条消息，并刷新更新时间"""
-        self.messages.append({"role": role, "content": content})
+    def add_message(self, role, content, **extra):
+        """向会话追加一条消息，并刷新更新时间。
+        extra 用于携带 trace 元数据（如 tool 名称），会一并持久化，但不发送给 LLM API。"""
+        message = {"role": role, "content": content}
+        message.update(extra)
+        self.messages.append(message)
         self.updated_at = datetime.now()
 
     def to_dict(self):
