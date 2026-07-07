@@ -18,6 +18,9 @@ HTTP 接口：
   POST /api/chat  {sessionId?, message}   -> 走 agent loop，返回 reply + events
   GET  /api/sessions/<id>/attachments     -> 该 session 的附件 metadata（session 隔离）
   POST /api/sessions/<id>/attachments     -> 上传附件 {filename, type?, dataBase64}
+  GET  /api/skills                        -> 列出全部可用 skill（轻量索引）
+  GET  /api/skills/<name>                 -> 某个 skill 的完整说明与资源文件名
+  GET  /api/sessions/<id>/skill-usage     -> 该 session 的 skill 使用记录
   GET  /api/health                        -> 健康检查
 
 sessionId 策略：
@@ -42,6 +45,8 @@ from .workspace import WorkspaceError, normalize_workspace
 _RE_MESSAGES = re.compile(r"^/api/sessions/([^/]+)/messages$")
 _RE_ATTACH = re.compile(r"^/api/sessions/([^/]+)/attachments$")
 _RE_WORKSPACE = re.compile(r"^/api/sessions/([^/]+)/workspace$")
+_RE_SKILL_USAGE = re.compile(r"^/api/sessions/([^/]+)/skill-usage$")
+_RE_SKILL = re.compile(r"^/api/skills/([^/]+)$")
 _RE_TASK = re.compile(r"^/api/tasks/([^/]+)$")
 _RE_TASK_CANCEL = re.compile(r"^/api/tasks/([^/]+)/cancel$")
 _RE_APPROVAL_DECIDE = re.compile(r"^/api/approvals/([^/]+)/decide$")
@@ -129,10 +134,14 @@ class Gateway:
         }
 
     # ---------- chat（进入 agent loop）----------
-    def chat(self, sid, message):
+    def chat(self, sid, message, skill_name=None):
         if not isinstance(message, str) or not message.strip():
             raise GatewayError(400, "message 不能为空")
         session = self._resolve_session(sid, allow_default=True)
+        # 显式调用某个 skill（免审批）：校验其存在，避免把无效名字传进 agent loop
+        if skill_name:
+            if self.runtime.skill_registry is None or not self.runtime.skill_registry.has(skill_name):
+                raise GatewayError(404, f"skill 不存在: {skill_name}")
 
         events = []
 
@@ -152,7 +161,8 @@ class Gateway:
 
         with self.lock:
             reply = self.runtime.run(session, message.strip(),
-                                     on_event=on_event, approval_fn=approval_fn)
+                                     on_event=on_event, approval_fn=approval_fn,
+                                     skill_name=skill_name or None)
 
         return {
             "ok": reply is not None,
@@ -189,6 +199,29 @@ class Gateway:
         except ApprovalError as e:
             raise GatewayError(400, str(e))
         return {"approval": rec}
+
+    # ---------- skill（Step 9）----------
+    def list_skills(self):
+        registry = self.runtime.skill_registry
+        skills = registry.list() if registry is not None else []
+        return {"skills": skills}
+
+    def get_skill(self, name):
+        registry = self.runtime.skill_registry
+        if registry is None or not registry.has(name):
+            raise GatewayError(404, f"skill 不存在: {name}")
+        skill = registry.load(name)
+        return {"skill": {
+            "name": skill.name,
+            "description": skill.description,
+            "instructions": skill.instructions,
+            "resources": list(skill.resources.keys()),
+        }}
+
+    def skill_usage(self, sid):
+        session = self._resolve_session(sid)
+        return {"sessionId": session.session_id,
+                "usages": getattr(session, "skill_usages", [])}
 
     # ---------- 附件 ----------
     def list_attachments(self, sid):
@@ -342,6 +375,14 @@ def _make_handler(gateway):
                 elif _RE_WORKSPACE.match(path):
                     sid = _RE_WORKSPACE.match(path).group(1)
                     self._send_json(200, gateway.get_workspace(sid))
+                elif _RE_SKILL_USAGE.match(path):
+                    sid = _RE_SKILL_USAGE.match(path).group(1)
+                    self._send_json(200, gateway.skill_usage(sid))
+                elif path == "/api/skills":
+                    self._send_json(200, gateway.list_skills())
+                elif _RE_SKILL.match(path):
+                    name = _RE_SKILL.match(path).group(1)
+                    self._send_json(200, gateway.get_skill(name))
                 elif gateway.downloads is not None and gateway.downloads.handle_get(self, path):
                     return  # 由下载注册表处理（Step 8）
                 else:
@@ -356,7 +397,9 @@ def _make_handler(gateway):
                 path = urlparse(self.path).path
                 if path == "/api/chat":
                     body = self._read_json()
-                    self._send_json(200, gateway.chat(body.get("sessionId"), body.get("message", "")))
+                    self._send_json(200, gateway.chat(
+                        body.get("sessionId"), body.get("message", ""),
+                        skill_name=body.get("skill")))
                 elif path == "/api/sessions":
                     body = self._read_json()
                     self._send_json(200, gateway.create_session(body.get("title")))

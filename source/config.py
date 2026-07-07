@@ -69,6 +69,10 @@ SHELL_OUTPUT_MAX_CHARS = int(os.getenv("SHELL_OUTPUT_MAX_CHARS", "20000"))
 # approval 等待用户决定的超时时间（秒），超时按拒绝处理，避免请求永久阻塞。
 APPROVAL_TIMEOUT_SECONDS = float(os.getenv("APPROVAL_TIMEOUT_SECONDS", "300"))
 
+# ===== Skill System（Step 9）配置 =====
+# 本地 skill 目录（项目根目录下 skills/），每个含 SKILL.md 的子目录即一个 skill。
+SKILLS_DIR = os.path.join(_PROJECT_ROOT, "skills")
+
 
 def load_api_key() -> str:
     """从 .env 文件（环境变量 LLM_API_KEY）加载 API Key"""

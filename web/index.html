@@ -74,6 +74,19 @@
   .task-hist { margin-top: 6px; border-top: 1px dashed #e2e4e8; padding-top: 6px; font-size: 12px; color: #555; max-height: 140px; overflow-y: auto; }
   .task-hist .h { margin: 2px 0; white-space: pre-wrap; word-break: break-word; }
   .task-hist .h.err { color: #b91c1c; }
+  /* skill 面板 */
+  .skill-card { border: 1px solid #e2e4e8; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; cursor: pointer; }
+  .skill-card:hover { border-color: #6366f1; background: #f5f5ff; }
+  .skill-card.sel { border-color: #6366f1; background: #eef0ff; box-shadow: 0 0 0 1px #6366f1 inset; }
+  .skill-card .sk-name { font-weight: 600; color: #4338ca; }
+  .skill-card .sk-desc { color: #555; font-size: 12px; margin-top: 3px; line-height: 1.5; }
+  #skill-run-box { margin-top: 12px; padding: 12px; background: #f7f8fa; border-radius: 8px; }
+  #skill-run-box textarea { width: 100%; padding: 7px; border: 1px solid #cbd2dc; border-radius: 6px; font-size: 13px; font-family: inherit; }
+  #skill-run { margin-top: 8px; padding: 8px 16px; background: #6366f1; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+  #skill-run:disabled { background: #b5b7e8; cursor: default; }
+  .trace.skill { border-left-color: #6366f1; color: #4338ca; background: #eef0ff; }
+  #skill-usage-list { margin-top: 14px; border-top: 1px dashed #e2e4e8; padding-top: 10px; }
+  #skill-usage-list .u { font-size: 12px; color: #555; margin: 4px 0; }
 </style>
 </head>
 <body>
@@ -87,6 +100,7 @@
       <span id="header-title">（未选择会话）</span>
       <span>
         <input type="file" id="file-input" style="display:none" />
+        <button class="tools-btn" id="skill-btn">🧩 Skills</button>
         <button class="tools-btn" id="task-btn">⏰ 定时任务</button>
         <button class="tools-btn" id="upload-btn">上传附件</button>
       </span>
@@ -151,8 +165,29 @@
       </div>
     </div>
   </div>
+  <div id="skill-modal" class="modal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <span>🧩 Skills（可复用工作方法）</span>
+        <button id="skill-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="color:#666;font-size:12px;margin-top:0">
+          选择一个 skill 并填写任务，claw 会加载它的说明与模板来完成任务（显式调用无需审批）。
+          聊天中 claw 也可能自主请求使用 skill，此时会弹出审批卡片。</p>
+        <div id="skill-list"></div>
+        <div id="skill-run-box">
+          <label style="font-size:12px;color:#555">任务内容（将交给所选 skill 完成）</label>
+          <textarea id="skill-task" rows="2" placeholder="例如：为《数据结构》课程写一份 2000 字的学习总结报告"></textarea>
+          <button id="skill-run" disabled>用所选 skill 执行</button>
+          <span id="skill-sel-hint" style="font-size:12px;color:#888;margin-left:8px">（未选择 skill）</span>
+        </div>
+        <div id="skill-usage-list"></div>
+      </div>
+    </div>
+  </div>
 <script>
-const state = { currentId: null, workspace: null, shownApprovals: new Set() };
+const state = { currentId: null, workspace: null, shownApprovals: new Set(), selectedSkill: null };
 const $ = (id) => document.getElementById(id);
 
 function showBanner(text, isError) {
@@ -230,6 +265,7 @@ async function setWorkspace() {
 function renderStored(m) {
   if (m.role === "user") return appendBubble("user", m.content);
   if (m.role === "assistant" && m.kind === "tool_request") return appendTrace("🔧 工具请求: " + m.content, false);
+  if (m.role === "assistant" && m.kind === "skill_request") return appendTrace("🧩 skill 请求: " + m.content, false, "skill");
   if (m.role === "assistant") return appendBubble("assistant", m.content);
   if (m.role === "tool") return appendTrace(`↳ [${m.tool || "tool"}] ${m.content}`, false);
 }
@@ -244,10 +280,10 @@ function appendBubble(role, text) {
   wrap.appendChild(b);
   box.appendChild(wrap);
 }
-function appendTrace(text, isErr) {
+function appendTrace(text, isErr, extraClass) {
   const box = $("messages");
   const d = document.createElement("div");
-  d.className = "trace" + (isErr ? " err" : "");
+  d.className = "trace" + (isErr ? " err" : "") + (extraClass ? " " + extraClass : "");
   d.textContent = text;
   box.appendChild(d);
 }
@@ -269,14 +305,22 @@ async function sendMessage() {
   if (!text) return;
   if (!state.currentId) { showBanner("请先创建或选择一个会话", true); return; }
   input.value = "";
+  await runChat(text, null);
+}
+
+async function runChat(text, skillName) {
+  if (!state.currentId) { showBanner("请先创建或选择一个会话", true); return; }
   $("send").disabled = true;
   appendBubble("user", text);
+  if (skillName) appendTrace(`🧩 使用 skill: ${skillName}（用户指定）`, false, "skill");
   scrollBottom();
-  // agent loop 遇到写/命令类 tool 时会在服务端阻塞等待审批；这里在请求进行期间
-  // 轮询 /api/approvals，把待审批项渲染成审批卡片，让用户批准/拒绝以解除阻塞。
+  // agent loop 遇到写/命令类 tool 或自主请求使用 skill 时会在服务端阻塞等待审批；
+  // 这里在请求进行期间轮询 /api/approvals，把待审批项渲染成审批卡片。
   const poll = setInterval(pollApprovals, 1000);
   try {
-    const data = await api("POST", "/api/chat", { sessionId: state.currentId, message: text });
+    const body = { sessionId: state.currentId, message: text };
+    if (skillName) body.skill = skillName;
+    const data = await api("POST", "/api/chat", body);
     (data.events || []).forEach((ev) => {
       if (ev.kind === "tool_call") appendTrace(`🔧 调用 ${ev.tool} ${JSON.stringify(ev.args)}`, false);
       else if (ev.kind === "approval_result")
@@ -286,6 +330,10 @@ async function sendMessage() {
         if (ev.ok && ev.extra && ev.extra.downloadUrl)
           appendDownload(ev.extra.downloadUrl, ev.extra.filename || "下载文件");
       }
+      else if (ev.kind === "skill")
+        appendTrace(`🧩 已加载 skill: ${ev.skill}（${ev.source === "explicit" ? "用户指定" : "模型自主"}${ev.reason ? "，理由: " + ev.reason : ""}）`, false, "skill");
+      else if (ev.kind === "skill_result" && !ev.ok)
+        appendTrace(`🧩 加载 skill ${ev.skill || ""} 失败: ${ev.error || ""}`, true);
       else if (ev.kind === "final") appendBubble("assistant", ev.content);
       else if (ev.kind === "error") appendTrace("错误: " + ev.message, true);
     });
@@ -489,6 +537,81 @@ $("task-form").addEventListener("submit", async (e) => {
     showBanner("创建任务失败: " + err.message, true);
   }
 });
+
+// ---------- Skills ----------
+async function openSkillModal() {
+  if (!state.currentId) { showBanner("请先创建或选择一个会话", true); return; }
+  state.selectedSkill = null;
+  updateSkillSelHint();
+  $("skill-modal").classList.add("open");
+  await Promise.all([loadSkills(), loadSkillUsage()]);
+}
+function closeSkillModal() { $("skill-modal").classList.remove("open"); }
+
+async function loadSkills() {
+  const box = $("skill-list");
+  try {
+    const data = await api("GET", "/api/skills");
+    if (!data.skills.length) { box.innerHTML = "<p style='color:#888'>（暂无可用 skill）</p>"; return; }
+    box.innerHTML = "";
+    data.skills.forEach((s) => box.appendChild(renderSkillCard(s)));
+  } catch (e) {
+    box.innerHTML = "<p style='color:#b91c1c'>加载 skill 失败: " + escapeHtml(e.message) + "</p>";
+  }
+}
+
+function renderSkillCard(s) {
+  const card = document.createElement("div");
+  card.className = "skill-card";
+  card.innerHTML = `<div class="sk-name">${escapeHtml(s.name)}</div>
+    <div class="sk-desc">${escapeHtml(s.description)}</div>`;
+  card.onclick = () => {
+    state.selectedSkill = s.name;
+    document.querySelectorAll("#skill-list .skill-card").forEach((c) => c.classList.remove("sel"));
+    card.classList.add("sel");
+    updateSkillSelHint();
+  };
+  return card;
+}
+
+function updateSkillSelHint() {
+  $("skill-sel-hint").textContent = state.selectedSkill ? "已选择：" + state.selectedSkill : "（未选择 skill）";
+  $("skill-run").disabled = !state.selectedSkill;
+}
+
+async function loadSkillUsage() {
+  if (!state.currentId) return;
+  const box = $("skill-usage-list");
+  try {
+    const data = await api("GET", `/api/sessions/${state.currentId}/skill-usage`);
+    if (!data.usages.length) { box.innerHTML = "<div style='color:#888;font-size:12px'>（本会话暂无 skill 使用记录）</div>"; return; }
+    box.innerHTML = "<div style='font-weight:600;font-size:12px;color:#444;margin-bottom:4px'>本会话 skill 使用记录</div>";
+    data.usages.slice().reverse().forEach((u) => {
+      const d = document.createElement("div");
+      d.className = "u";
+      const src = u.source === "explicit" ? "用户指定" : "模型自主";
+      d.textContent = `${fmtTime(u.usedAt)} · ${u.skill}（${src}）${u.reason ? " 理由: " + u.reason : ""}`;
+      box.appendChild(d);
+    });
+  } catch (e) {
+    box.innerHTML = "";
+  }
+}
+
+async function runSkill() {
+  const task = $("skill-task").value.trim();
+  if (!state.selectedSkill) { showBanner("请先选择一个 skill", true); return; }
+  if (!task) { showBanner("请填写要交给 skill 的任务内容", true); return; }
+  const skillName = state.selectedSkill;
+  $("skill-task").value = "";
+  closeSkillModal();
+  await runChat(task, skillName);
+}
+
+$("skill-btn").onclick = () => openSkillModal().catch((e) => showBanner("打开 skill 面板失败: " + e.message, true));
+$("skill-close").onclick = closeSkillModal;
+$("skill-modal").addEventListener("click", (e) => { if (e.target.id === "skill-modal") closeSkillModal(); });
+$("skill-run").onclick = () => runSkill().catch((e) => showBanner("执行失败: " + e.message, true));
 
 loadSessions().catch((e) => showBanner("加载会话失败: " + e.message, true));
 </script>

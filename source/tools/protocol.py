@@ -22,10 +22,12 @@ MAX_TOOL_CALLS_PER_ROUND = 5
 
 @dataclass
 class ParsedOutput:
-    kind: str                       # "tool_calls" 或 "final"
+    kind: str                       # "tool_calls" / "final" / "use_skill"
     calls: list = field(default_factory=list)   # [{"tool": str, "args": dict}]
     content: str = ""
     raw: str = ""
+    skill: str = ""                 # kind == "use_skill" 时的 skill 名称
+    reason: str = ""                # kind == "use_skill" 时模型给出的选用理由
 
 
 def _iter_json_objects(text: str):
@@ -102,6 +104,12 @@ def _as_protocol(obj) -> ParsedOutput | None:
         calls = _normalize_calls(obj.get("calls"))
         if calls:
             return ParsedOutput(kind="tool_calls", calls=calls)
+        return None
+    if t == "use_skill":
+        skill = obj.get("skill")
+        if isinstance(skill, str) and skill:
+            reason = obj.get("reason", "")
+            return ParsedOutput(kind="use_skill", skill=skill, reason=str(reason))
         return None
     return None
 

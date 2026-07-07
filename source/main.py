@@ -42,6 +42,8 @@ def print_banner(model, session):
     print("  /memory add     - 添加长期记忆")
     print("  /workspace show - 查看当前 workspace")
     print("  /workspace set  - 设置 workspace 目录")
+    print("  /skill list     - 列出可用 skill")
+    print("  /skill <name> ..- 用某个 skill 完成任务")
     print("  /compact        - 立即压缩当前会话")
     print("  /help           - 显示帮助")
     print(LINE)
@@ -65,6 +67,10 @@ def print_help():
     print("  /memory delete <id>          - 删除指定长期记忆")
     print("  /workspace show              - 查看当前会话的 workspace")
     print("  /workspace set <path>        - 设置当前会话的 workspace 目录")
+    print("  /skill list                  - 列出全部可用 skill")
+    print("  /skill show <name>           - 查看某个 skill 的完整说明")
+    print("  /skill usage                 - 查看当前会话的 skill 使用记录")
+    print("  /skill <name> <task>         - 用指定 skill 完成任务（免审批）")
     print("  /compact                     - 立即压缩当前会话的较早消息")
 
 
@@ -191,6 +197,86 @@ def _print_compaction_summary(result):
     print(result["summary"])
 
 
+def handle_skill_command(runtime, raw):
+    """/skill list | show <name> | usage | <name> <task>。
+    - list：列出全部可用 skill（name + 适用场景）；
+    - show <name>：查看某个 skill 的完整说明与资源文件名；
+    - usage：查看当前会话内的 skill 使用记录；
+    - <name> <task>：用户显式调用某个 skill 完成 <task>（免审批，直接加载完整内容）。"""
+    registry = runtime.skill_registry
+    parts = raw.split(maxsplit=2)
+    if len(parts) < 2:
+        print("用法: /skill list | show <name> | usage | <name> <task>")
+        return
+    sub = parts[1]
+    if sub == "list":
+        _print_skill_list(registry)
+    elif sub == "show":
+        if len(parts) < 3 or not parts[2].strip():
+            print("用法: /skill show <name>")
+            return
+        _print_skill_show(registry, parts[2].strip())
+    elif sub == "usage":
+        _print_skill_usage(runtime.manager.current)
+    else:
+        # 其余情况视为显式调用：/skill <name> <task>
+        name = sub
+        task = parts[2].strip() if len(parts) >= 3 else ""
+        if registry is None or not registry.has(name):
+            print(f"[错误] 不存在名为 '{name}' 的 skill（用 /skill list 查看可用列表）")
+            return
+        if not task:
+            print(f"用法: /skill {name} <task>（请在 skill 名后给出要完成的任务）")
+            return
+        chat_once(runtime, task, skill_name=name)
+
+
+def _print_skill_list(registry):
+    skills = registry.list() if registry is not None else []
+    if not skills:
+        print("（暂无可用 skill）")
+        return
+    print("Skills:")
+    for s in skills:
+        print(f"  {s['name']}")
+        print(f"      {s['description']}")
+
+
+def _print_skill_show(registry, name):
+    if registry is None or not registry.has(name):
+        print(f"[错误] 不存在名为 '{name}' 的 skill")
+        return
+    try:
+        skill = registry.load(name)
+    except Exception as e:
+        print(f"[错误] 加载 skill 失败: {e}")
+        return
+    print(f"Skill: {skill.name}")
+    print(f"描述: {skill.description}")
+    print(LINE)
+    print(skill.instructions or "（无正文）")
+    if skill.resources:
+        print(LINE)
+        print("资源文件:")
+        for rel in skill.resources:
+            print(f"  - {rel}")
+
+
+def _print_skill_usage(session):
+    usages = getattr(session, "skill_usages", [])
+    if not usages:
+        print("（本会话暂无 skill 使用记录）")
+        return
+    print(f"Skill usage（{session.session_id}）:")
+    for u in usages:
+        src = u.get("source", "")
+        reason = f" 理由={u['reason']}" if u.get("reason") else ""
+        print(f"  {u.get('usedAt', '')} · {u.get('skill', '')}（{src}）{reason}")
+        task = u.get("task", "")
+        if task:
+            print(f"      task: {task}")
+
+
 def handle_compact_command(client, manager):
     """手动 /compact：立即压缩当前会话，并在应用后持久化。"""
     session = manager.current
@@ -226,6 +312,13 @@ def _cli_event_printer(kind, data):
         text = data["output"] if data["ok"] else data["error"]
         preview = text if len(text) <= 500 else text[:500] + " ...(已截断)"
         print(f"[tool_result] {data['tool']} ({status}) {preview}")
+    elif kind == "skill":
+        src = "用户指定" if data.get("source") == "explicit" else "模型自主选择"
+        reason = f"，理由: {data['reason']}" if data.get("reason") else ""
+        print(f"[skill] 已加载 skill: {data['skill']}（{src}{reason}）")
+    elif kind == "skill_result":
+        if not data.get("ok", False):
+            print(f"[skill] 加载 skill {data.get('skill', '')} 失败: {data.get('error', '')}")
     elif kind == "final":
         print(f"[Assistant] {data['content']}")
     elif kind == "error":
@@ -257,10 +350,12 @@ def _cli_approval(tool, args):
     return (False, reason or "用户未批准该操作。")
 
 
-def chat_once(runtime, user_input):
-    """通过统一 agent runtime 处理一轮对话（含 tool loop、审批、压缩与持久化）。"""
+def chat_once(runtime, user_input, skill_name=None):
+    """通过统一 agent runtime 处理一轮对话（含 tool loop、审批、压缩与持久化）。
+    skill_name 非空时表示用户显式调用某个 skill（免审批，直接加载完整内容）。"""
     session = runtime.manager.current
-    runtime.run(session, user_input, on_event=_cli_event_printer, approval_fn=_cli_approval)
+    runtime.run(session, user_input, on_event=_cli_event_printer,
+                approval_fn=_cli_approval, skill_name=skill_name)
 
 
 def main():
@@ -299,6 +394,9 @@ def main():
             continue
         if user_input.startswith("/workspace"):
             handle_workspace_command(manager, user_input)
+            continue
+        if user_input.startswith("/skill"):
+            handle_skill_command(runtime, user_input)
             continue
         if user_input == "/compact":
             handle_compact_command(client, manager)
