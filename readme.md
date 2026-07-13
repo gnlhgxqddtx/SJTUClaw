@@ -4,6 +4,8 @@ SJTUClaw 是一个简化且面向教学的 claw agent（爪子智能体）。用
 
 项目仅依赖极少的第三方库（`openai` 与 `python-dotenv`），其余能力（HTTP 服务、Web 前端、定时任务、工具系统等）全部基于 Python 标准库实现，便于逐层阅读与教学演示。
 
+> 课程文档：https://notes.sjtu.edu.cn/s/hl2bu_P7L
+
 > 当前版本：**v1.0.0（稳定版）**，已完成课程需求 Step 1–9 的全部功能。
 
 ---
