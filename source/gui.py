@@ -293,6 +293,12 @@ class SessionWidget(QtWidgets.QWidget):
         self._status_signal.emit("think")
 
         session = _gui_ctx.runtime.manager.current
+        session.add_message("user", message)
+        self._update_right_panel()
+        try:
+            _gui_ctx.runtime.manager.save(session)
+        except SessionError:
+            pass
 
         def run_thread():
             try:
@@ -333,7 +339,8 @@ class SessionWidget(QtWidgets.QWidget):
 
                 self._result_signal.emit(result_text, True)
             except Exception as e:
-                self._result_signal.emit(f"调用失败: {e}", False)
+                error_info = f"调用失败: {e}"
+                self._result_signal.emit(error_info, False)
 
         thread = threading.Thread(target=run_thread, daemon=True)
         thread.start()
@@ -343,7 +350,32 @@ class SessionWidget(QtWidgets.QWidget):
             self._status_signal.emit("success")
         else:
             self._status_signal.emit("fail")
-        self.refresh()
+            self._log_error(result_text)
+        self._update_right_panel()
+
+    def _log_error(self, error_text):
+        problems_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "possible_problems.txt")
+        problem_lines = []
+        if "libpng warning: iCCP" in error_text or "image" in error_text.lower() or "png" in error_text.lower():
+            problem_lines.append("lib png warning: iCCP: known incorrect sRGB profile")
+            problem_lines.append("图片文件未能正确加载")
+        if "API" in error_text or "key" in error_text.lower() or "auth" in error_text.lower():
+            problem_lines.append("API请求失败")
+            problem_lines.append("API Key可能无效或已过期")
+        if "network" in error_text.lower() or "connection" in error_text.lower() or "timeout" in error_text.lower():
+            problem_lines.append("网络连接失败")
+            problem_lines.append("网络连接不稳定或API服务器不可达")
+        if "model" in error_text.lower() or "service" in error_text.lower():
+            problem_lines.append("模型服务异常")
+            problem_lines.append("模型服务暂时不可用")
+        if not problem_lines:
+            problem_lines.append(error_text)
+            problem_lines.append("未知原因")
+        try:
+            with open(problems_path, "a", encoding="utf-8") as f:
+                f.write("\n".join(problem_lines) + "\n")
+        except Exception:
+            pass
 
 
 class MemoryWidget(QtWidgets.QWidget):
