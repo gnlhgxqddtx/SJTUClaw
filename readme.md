@@ -32,6 +32,7 @@ SJTUClaw 是一个简化且面向教学的 claw agent（爪子智能体）。用
 - **LLM 调用**：`openai`（OpenAI 兼容协议），默认对接 SJTU 模型服务
 - **配置**：`python-dotenv`，密钥与参数从项目根目录 `.env` 读取
 - **服务与前端**：Python 标准库 `http.server` + 原生 HTML / JavaScript（`fetch`）
+- **桌面 GUI**：`pyguiadapter`（基于 PyQt，自动将函数转换为图形化界面）
 - **持久化**：本地 JSON 文件（会话、长期记忆、定时任务）
 
 ---
@@ -43,6 +44,7 @@ SJTUClaw/
 ├── source/                     # 源码
 │   ├── main.py                 # CLI 交互式入口（python -m source.main）
 │   ├── gateway.py              # HTTP 服务 + Web 入口（python -m source.gateway）
+│   ├── gui.py                  # 桌面图形化界面（基于 PyGUIAdapter）
 │   ├── agent.py                # AgentRuntime：CLI/Gateway/Scheduler 共用的统一执行路径
 │   ├── config.py               # 配置（从 .env 读取，含默认值）
 │   ├── llm_client.py           # LLM 客户端（OpenAI 兼容，支持流式）
@@ -132,6 +134,14 @@ python -m source.gateway
 ```
 
 启动后在浏览器打开 `http://127.0.0.1:8000`（可通过 `.env` 的 `GATEWAY_HOST` / `GATEWAY_PORT` 调整）。Gateway 会同时启动定时任务调度器。
+
+### 7. 启动桌面图形化界面（PyGUIAdapter）
+
+```bash
+python -m source.gui
+```
+
+首次启动需先点击「初始化运行时」，然后即可使用聊天、会话管理、长期记忆、Workspace 设置、技能管理等功能。
 
 ---
 
