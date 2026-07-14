@@ -6,6 +6,7 @@ DD-SJTUClaw 图形化界面入口（基于 PyQt5）
 
 import sys
 import threading
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -60,9 +61,15 @@ def _gui_approval(tool, args):
 
 
 class SessionWidget(QtWidgets.QWidget):
+    _status_signal = QtCore.pyqtSignal(str)
+    _result_signal = QtCore.pyqtSignal(str, bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._reanim_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "reanim")
         self._setup_ui()
+        self._status_signal.connect(self._update_status_image)
+        self._result_signal.connect(self._on_run_result)
 
     def _setup_ui(self):
         layout = QtWidgets.QHBoxLayout(self)
@@ -88,6 +95,15 @@ class SessionWidget(QtWidgets.QWidget):
         self.compact_btn = QtWidgets.QPushButton("压缩会话")
         self.compact_btn.clicked.connect(self._on_compact)
         left_layout.addWidget(self.compact_btn)
+
+        mouse_layout = QtWidgets.QHBoxLayout()
+        mouse_layout.addStretch()
+        self.status_label = QtWidgets.QLabel()
+        self.status_label.setFixedSize(64, 64)
+        self._load_status_image("default")
+        mouse_layout.addWidget(self.status_label)
+        mouse_layout.addStretch()
+        left_layout.addLayout(mouse_layout)
 
         layout.addWidget(self.left_panel, 1)
 
@@ -115,6 +131,16 @@ class SessionWidget(QtWidgets.QWidget):
         layout.addWidget(self.right_panel, 2)
 
         self._editing_item = None
+        self._editing_session_id = None
+
+    def _load_status_image(self, status):
+        img_path = os.path.join(self._reanim_dir, f"{status}.png")
+        if os.path.exists(img_path):
+            pixmap = QtGui.QPixmap(img_path)
+            self.status_label.setPixmap(pixmap.scaled(64, 64, QtCore.Qt.KeepAspectRatio))
+
+    def _update_status_image(self, status):
+        self._load_status_image(status)
 
     def refresh(self):
         if _gui_ctx.runtime is None:
@@ -123,12 +149,12 @@ class SessionWidget(QtWidgets.QWidget):
         sessions = _gui_ctx.runtime.manager.list_sorted()
         current_id = _gui_ctx.runtime.manager.current_id
         for s in sessions:
-            item = QtWidgets.QListWidgetItem()
             marker = "⭐️ " if s.session_id == current_id else ""
-            item.setText(f"{marker}{s.title} ({s.session_id})")
+            item = QtWidgets.QListWidgetItem(f"{marker}{s.title} ({s.session_id})")
             item.setData(QtCore.Qt.UserRole, s.session_id)
             self.session_list.addItem(item)
         self._update_right_panel()
+        self._load_status_image("default")
 
     def _update_right_panel(self):
         if _gui_ctx.runtime is None:
@@ -196,19 +222,30 @@ class SessionWidget(QtWidgets.QWidget):
                     self._start_rename(item)
 
     def _start_rename(self, item):
-        self._editing_item = item
-        self.session_list.editItem(item)
+        session_id = item.data(QtCore.Qt.UserRole)
+        full_text = item.text()
+        title_part = full_text.split(" (")[0].replace("⭐️ ", "")
+        editable_item = QtWidgets.QListWidgetItem(title_part)
+        editable_item.setData(QtCore.Qt.UserRole, session_id)
+        row = self.session_list.row(item)
+        self.session_list.takeItem(row)
+        self.session_list.insertItem(row, editable_item)
+        self.session_list.setCurrentItem(editable_item)
+        self._editing_item = editable_item
+        self._editing_session_id = session_id
+        self.session_list.editItem(editable_item)
 
     def _finish_rename(self):
-        if self._editing_item:
-            new_title = self._editing_item.text().split(" (")[0]
-            session_id = self._editing_item.data(QtCore.Qt.UserRole)
-            try:
-                _gui_ctx.runtime.manager.rename(session_id, new_title)
-                self.refresh()
-            except SessionError as e:
-                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+        if self._editing_item and self._editing_session_id:
+            new_title = self._editing_item.text().strip()
+            if new_title:
+                try:
+                    _gui_ctx.runtime.manager.rename(self._editing_session_id, new_title)
+                except SessionError as e:
+                    QtWidgets.QMessageBox.warning(self, "错误", str(e))
             self._editing_item = None
+            self._editing_session_id = None
+            self.refresh()
 
     def _on_new_session(self):
         if _gui_ctx.runtime is None:
@@ -252,45 +289,60 @@ class SessionWidget(QtWidgets.QWidget):
         if not message:
             return
 
-        _gui_ctx.clear_events()
-        session = _gui_ctx.runtime.manager.current
-        result = _gui_ctx.runtime.run(
-            session, message, on_event=_event_collector,
-            approval_fn=_gui_approval, skill_name=None
-        )
-
-        events = _gui_ctx.clear_events()
-        trace_lines = []
-        for ev in events:
-            kind = ev["kind"]
-            time = ev["time"]
-            data = ev["data"]
-            if kind == "tool_call":
-                trace_lines.append(f"🔧 [{time}] {data['tool']} {data['args']}")
-            elif kind == "approval":
-                trace_lines.append(f"⚠️ [{time}] 需要审批: {data['tool']}")
-            elif kind == "approval_result":
-                verb = "✅ 批准" if data["approved"] else "❌ 拒绝"
-                trace_lines.append(f"📋 [{time}] {data['tool']} {verb}")
-            elif kind == "tool_result":
-                status = "成功" if data["ok"] else "失败"
-                text = data["output"] if data["ok"] else data["error"]
-                preview = text if len(text) <= 500 else text[:500] + " ...(已截断)"
-                trace_lines.append(f"📊 [{time}] {data['tool']} ({status}): {preview}")
-            elif kind == "skill":
-                src = "用户指定" if data.get("source") == "explicit" else "模型自主"
-                trace_lines.append(f"🧩 [{time}] 已加载技能: {data['skill']}（{src}）")
-            elif kind == "compaction":
-                if data.get("applied"):
-                    trace_lines.append(f"📦 [{time}] 已压缩: 旧消息={data['old_count']}, 保留={data['recent_count']}")
-
-        if trace_lines:
-            result_text = "\n".join(trace_lines) + "\n\n" + ("=" * 60) + "\n" + (result or "调用失败")
-        else:
-            result_text = result or "调用失败"
-
-        QtWidgets.QMessageBox.information(self, "回复", result_text)
         self.input_edit.clear()
+        self._status_signal.emit("think")
+
+        session = _gui_ctx.runtime.manager.current
+
+        def run_thread():
+            try:
+                _gui_ctx.clear_events()
+                result = _gui_ctx.runtime.run(
+                    session, message, on_event=_event_collector,
+                    approval_fn=_gui_approval, skill_name=None
+                )
+                events = _gui_ctx.clear_events()
+                trace_lines = []
+                for ev in events:
+                    kind = ev["kind"]
+                    time = ev["time"]
+                    data = ev["data"]
+                    if kind == "tool_call":
+                        trace_lines.append(f"🔧 [{time}] {data['tool']} {data['args']}")
+                    elif kind == "approval":
+                        trace_lines.append(f"⚠️ [{time}] 需要审批: {data['tool']}")
+                    elif kind == "approval_result":
+                        verb = "✅ 批准" if data["approved"] else "❌ 拒绝"
+                        trace_lines.append(f"📋 [{time}] {data['tool']} {verb}")
+                    elif kind == "tool_result":
+                        status = "成功" if data["ok"] else "失败"
+                        text = data["output"] if data["ok"] else data["error"]
+                        preview = text if len(text) <= 500 else text[:500] + " ...(已截断)"
+                        trace_lines.append(f"📊 [{time}] {data['tool']} ({status}): {preview}")
+                    elif kind == "skill":
+                        src = "用户指定" if data.get("source") == "explicit" else "模型自主"
+                        trace_lines.append(f"🧩 [{time}] 已加载技能: {data['skill']}（{src}）")
+                    elif kind == "compaction":
+                        if data.get("applied"):
+                            trace_lines.append(f"📦 [{time}] 已压缩: 旧消息={data['old_count']}, 保留={data['recent_count']}")
+
+                if trace_lines:
+                    result_text = "\n".join(trace_lines) + "\n\n" + ("=" * 60) + "\n" + (result or "调用失败")
+                else:
+                    result_text = result or "调用失败"
+
+                self._result_signal.emit(result_text, True)
+            except Exception as e:
+                self._result_signal.emit(f"调用失败: {e}", False)
+
+        thread = threading.Thread(target=run_thread, daemon=True)
+        thread.start()
+
+    def _on_run_result(self, result_text, success):
+        if success:
+            self._status_signal.emit("success")
+        else:
+            self._status_signal.emit("fail")
         self.refresh()
 
 
@@ -347,8 +399,7 @@ class MemoryWidget(QtWidgets.QWidget):
         self.memory_list.clear()
         memories = _gui_ctx.runtime.memory_store.list()
         for m in memories:
-            item = QtWidgets.QListWidgetItem()
-            item.setText(f"{m['id']}: {m['content'][:30]}...")
+            item = QtWidgets.QListWidgetItem(f"{m['id']}: {m['content'][:30]}...")
             item.setData(QtCore.Qt.UserRole, m)
             self.memory_list.addItem(item)
         self.content_edit.clear()
@@ -394,20 +445,29 @@ class MemoryWidget(QtWidgets.QWidget):
                 self._start_rename(item)
 
     def _start_rename(self, item):
-        self._editing_item = item
-        self.memory_list.editItem(item)
+        memory = item.data(QtCore.Qt.UserRole)
+        content_part = item.text().split(": ", 1)[-1]
+        editable_item = QtWidgets.QListWidgetItem(content_part)
+        editable_item.setData(QtCore.Qt.UserRole, memory)
+        row = self.memory_list.row(item)
+        self.memory_list.takeItem(row)
+        self.memory_list.insertItem(row, editable_item)
+        self.memory_list.setCurrentItem(editable_item)
+        self._editing_item = editable_item
+        self.memory_list.editItem(editable_item)
 
     def _finish_rename(self):
         if self._editing_item:
-            new_content = self._editing_item.text().split(": ", 1)[-1]
             memory = self._editing_item.data(QtCore.Qt.UserRole)
-            try:
-                _gui_ctx.runtime.memory_store.add(new_content)
-                _gui_ctx.runtime.memory_store.delete(memory["id"])
-                self.refresh()
-            except MemoryError as e:
-                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+            new_content = self._editing_item.text().strip()
+            if new_content:
+                try:
+                    _gui_ctx.runtime.memory_store.add(new_content)
+                    _gui_ctx.runtime.memory_store.delete(memory["id"])
+                except MemoryError as e:
+                    QtWidgets.QMessageBox.warning(self, "错误", str(e))
             self._editing_item = None
+            self.refresh()
 
     def _on_new_memory(self):
         if _gui_ctx.runtime is None:
@@ -503,7 +563,6 @@ class WorkspaceWidget(QtWidgets.QWidget):
         self.ws_label.setText(f"当前 Workspace：{ws or '未设置'}")
         self.file_list.clear()
         if ws:
-            import os
             try:
                 for f in os.listdir(ws):
                     full_path = os.path.join(ws, f)
@@ -541,7 +600,6 @@ class WorkspaceWidget(QtWidgets.QWidget):
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
         )
         if reply == QtWidgets.QMessageBox.Yes:
-            import os
             try:
                 os.remove(full_path)
                 self.refresh()
@@ -557,21 +615,28 @@ class WorkspaceWidget(QtWidgets.QWidget):
                 self._start_rename(item)
 
     def _start_rename(self, item):
-        self._editing_item = item
-        self.file_list.editItem(item)
+        full_path = item.data(QtCore.Qt.UserRole)
+        editable_item = QtWidgets.QListWidgetItem(item.text())
+        editable_item.setData(QtCore.Qt.UserRole, full_path)
+        row = self.file_list.row(item)
+        self.file_list.takeItem(row)
+        self.file_list.insertItem(row, editable_item)
+        self.file_list.setCurrentItem(editable_item)
+        self._editing_item = editable_item
+        self.file_list.editItem(editable_item)
 
     def _finish_rename(self):
         if self._editing_item:
             old_path = self._editing_item.data(QtCore.Qt.UserRole)
-            new_name = self._editing_item.text()
-            import os
-            new_path = os.path.join(os.path.dirname(old_path), new_name)
-            try:
-                os.rename(old_path, new_path)
-                self.refresh()
-            except Exception as e:
-                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+            new_name = self._editing_item.text().strip()
+            if new_name:
+                new_path = os.path.join(os.path.dirname(old_path), new_name)
+                try:
+                    os.rename(old_path, new_path)
+                except Exception as e:
+                    QtWidgets.QMessageBox.warning(self, "错误", str(e))
             self._editing_item = None
+            self.refresh()
 
     def _on_new_file(self):
         if _gui_ctx.runtime is None:
@@ -583,7 +648,6 @@ class WorkspaceWidget(QtWidgets.QWidget):
             return
         filename, ok = QtWidgets.QInputDialog.getText(self, "新建文件", "输入文件名：")
         if ok and filename.strip():
-            import os
             full_path = os.path.join(ws, filename.strip())
             if os.path.exists(full_path):
                 QtWidgets.QMessageBox.warning(self, "错误", "文件已存在")
