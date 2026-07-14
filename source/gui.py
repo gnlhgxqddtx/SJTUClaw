@@ -1,9 +1,7 @@
 """
-DD-SJTUClaw 图形化界面入口（基于 PyGUIAdapter）
+DD-SJTUClaw 图形化界面入口（基于 PyQt5）
 
 启动方式：python -m source.gui
-
-PyGUIAdapter (0.3.12) 将函数自动转换为 GUI，通过 GUIAdapter.add() 注册功能。
 """
 
 import sys
@@ -11,7 +9,7 @@ import threading
 from datetime import datetime
 from typing import Optional
 
-from pyguiadapter import GUIAdapter
+from PyQt5 import QtWidgets, QtCore, QtGui
 
 from .agent import build_runtime
 from .approval import ApprovalManager
@@ -31,7 +29,6 @@ class GUIContext:
     def init_runtime(self):
         self.runtime = build_runtime()
         self.approval_manager = ApprovalManager(timeout=APPROVAL_TIMEOUT_SECONDS)
-        return f"✅ 运行时初始化成功\n模型: {DEFAULT_MODEL}\n会话: {len(self.runtime.manager.sessions)} 个\n技能: {len(self.runtime.skill_registry.list())} 个"
 
     def clear_events(self):
         with self._event_lock:
@@ -62,271 +59,757 @@ def _gui_approval(tool, args):
     return approved, reason
 
 
-# ---------- 会话管理 ----------
+class SessionWidget(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._setup_ui()
 
-def list_sessions() -> str:
-    """列出所有会话"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    sessions = _gui_ctx.runtime.manager.list_sorted()
-    if not sessions:
-        return "（暂无会话）"
-    lines = []
-    for s in sessions:
-        marker = "⭐️ 当前" if s.session_id == _gui_ctx.runtime.manager.current_id else "   "
-        lines.append(f"{marker} {s.session_id:<12} {s.title:<16} 消息数={len(s.messages)}")
-    return "\n".join(lines)
+    def _setup_ui(self):
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
+        self.left_panel = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(self.left_panel)
+        left_layout.setContentsMargins(5, 5, 5, 5)
+        left_layout.setSpacing(3)
 
-def new_session(title: str = "新会话") -> str:
-    """创建新会话"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    try:
-        session = _gui_ctx.runtime.manager.new_session(title)
-        return f"✅ 创建会话: {session.session_id}（{session.title}）"
-    except Exception as e:
-        return f"❌ 创建失败: {e}"
+        self.session_list = QtWidgets.QListWidget()
+        self.session_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.session_list.itemDoubleClicked.connect(self._on_item_double_click)
+        self.session_list.keyPressEvent = self._on_key_press
+        left_layout.addWidget(QtWidgets.QLabel("会话列表"))
+        left_layout.addWidget(self.session_list)
 
+        self.new_btn = QtWidgets.QPushButton("新建会话")
+        self.new_btn.clicked.connect(self._on_new_session)
+        left_layout.addWidget(self.new_btn)
 
-def switch_session(session_id: str) -> str:
-    """切换会话（支持简写，如 001 或 1）"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    try:
-        session = _gui_ctx.runtime.manager.switch(session_id)
-        ws = getattr(session, "workspace", None)
-        return f"✅ 已切换到: {session.session_id}（{session.title}）\nWorkspace: {ws or '未设置'}"
-    except SessionError as e:
-        return f"❌ {e}"
+        self.compact_btn = QtWidgets.QPushButton("压缩会话")
+        self.compact_btn.clicked.connect(self._on_compact)
+        left_layout.addWidget(self.compact_btn)
 
+        layout.addWidget(self.left_panel, 1)
 
-def delete_session(session_id: str) -> str:
-    """删除会话"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    try:
-        deleted = _gui_ctx.runtime.manager.delete(session_id)
-        return f"✅ 已删除会话: {deleted}"
-    except SessionError as e:
-        return f"❌ {e}"
+        self.right_panel = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(self.right_panel)
+        right_layout.setContentsMargins(5, 5, 5, 5)
+        right_layout.setSpacing(3)
 
+        self.title_label = QtWidgets.QLabel("当前会话：")
+        right_layout.addWidget(self.title_label)
 
-def rename_session(session_id: str, new_title: str) -> str:
-    """重命名会话"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    try:
-        session = _gui_ctx.runtime.manager.rename(session_id, new_title)
-        return f"✅ 已重命名: {session.session_id} -> {session.title}"
-    except SessionError as e:
-        return f"❌ {e}"
+        self.content_text = QtWidgets.QTextEdit()
+        self.content_text.setReadOnly(True)
+        right_layout.addWidget(self.content_text)
 
+        self.input_layout = QtWidgets.QHBoxLayout()
+        self.input_edit = QtWidgets.QLineEdit()
+        self.input_edit.returnPressed.connect(self._on_send)
+        self.send_btn = QtWidgets.QPushButton("发送")
+        self.send_btn.clicked.connect(self._on_send)
+        self.input_layout.addWidget(self.input_edit)
+        self.input_layout.addWidget(self.send_btn)
+        right_layout.addLayout(self.input_layout)
 
-# ---------- 长期记忆 ----------
+        layout.addWidget(self.right_panel, 2)
 
-def list_memories() -> str:
-    """列出所有长期记忆"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    memories = _gui_ctx.runtime.memory_store.list()
-    if not memories:
-        return "（暂无长期记忆）"
-    lines = []
-    for m in memories:
-        lines.append(f"{m['id']:<10} {m['content']}")
-    return "\n".join(lines)
+        self._editing_item = None
 
+    def refresh(self):
+        if _gui_ctx.runtime is None:
+            return
+        self.session_list.clear()
+        sessions = _gui_ctx.runtime.manager.list_sorted()
+        current_id = _gui_ctx.runtime.manager.current_id
+        for s in sessions:
+            item = QtWidgets.QListWidgetItem()
+            marker = "⭐️ " if s.session_id == current_id else ""
+            item.setText(f"{marker}{s.title} ({s.session_id})")
+            item.setData(QtCore.Qt.UserRole, s.session_id)
+            self.session_list.addItem(item)
+        self._update_right_panel()
 
-def add_memory(content: str) -> str:
-    """添加长期记忆"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    if not content.strip():
-        return "❌ 内容不能为空"
-    try:
-        item = _gui_ctx.runtime.memory_store.add(content)
-        return f"✅ 添加记忆: {item['id']}"
-    except MemoryError as e:
-        return f"❌ {e}"
-
-
-def delete_memory(memory_id: str) -> str:
-    """删除长期记忆"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    try:
-        deleted = _gui_ctx.runtime.memory_store.delete(memory_id)
-        return f"✅ 已删除记忆: {deleted}"
-    except MemoryError as e:
-        return f"❌ {e}"
-
-
-# ---------- Workspace ----------
-
-def show_workspace() -> str:
-    """查看当前会话的 workspace"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    session = _gui_ctx.runtime.manager.current
-    ws = getattr(session, "workspace", None)
-    return f"当前 workspace: {ws or '未设置'}\n\n⚠️ 高级工具（写文件/执行命令）需要先设置 workspace"
-
-
-def set_workspace(path: str) -> str:
-    """设置当前会话的 workspace 目录"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    if not path.strip():
-        return "❌ 路径不能为空"
-    try:
-        ws = normalize_workspace(path)
+    def _update_right_panel(self):
+        if _gui_ctx.runtime is None:
+            return
         session = _gui_ctx.runtime.manager.current
-        session.workspace = ws
-        _gui_ctx.runtime.manager.save(session)
-        return f"✅ workspace 已设置为: {ws}"
-    except WorkspaceError as e:
-        return f"❌ {e}"
-    except SessionError as e:
-        return f"❌ 保存失败: {e}"
+        self.title_label.setText(f"当前会话：{session.title} ({session.session_id})")
+        content = ""
+        for msg in session.messages:
+            role = "用户" if msg["role"] == "user" else "助手"
+            content += f"{role}: {msg['content']}\n\n"
+        self.content_text.setPlainText(content.strip())
+
+    def _on_item_double_click(self, item):
+        if _gui_ctx.runtime is None:
+            return
+        session_id = item.data(QtCore.Qt.UserRole)
+        current_id = _gui_ctx.runtime.manager.current_id
+        if session_id == current_id:
+            self._start_rename(item)
+        else:
+            try:
+                _gui_ctx.runtime.manager.switch(session_id)
+                self.refresh()
+            except SessionError as e:
+                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+
+    def _on_key_press(self, event):
+        if event.key() == QtCore.Qt.Key_Delete:
+            self._on_delete()
+        elif event.key() == QtCore.Qt.Key_Return or event.key() == QtCore.Qt.Key_Enter:
+            self._on_enter_key()
+        else:
+            super(type(self.session_list), self.session_list).keyPressEvent(event)
+
+    def _on_delete(self):
+        if _gui_ctx.runtime is None:
+            return
+        item = self.session_list.currentItem()
+        if item is None:
+            return
+        session_id = item.data(QtCore.Qt.UserRole)
+        current_id = _gui_ctx.runtime.manager.current_id
+        if session_id != current_id:
+            return
+        reply = QtWidgets.QMessageBox.question(
+            self, "确认删除", f"确定删除会话 '{item.text()}' 吗？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            try:
+                _gui_ctx.runtime.manager.delete(session_id)
+                self.refresh()
+            except SessionError as e:
+                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+
+    def _on_enter_key(self):
+        if self._editing_item:
+            self._finish_rename()
+        else:
+            item = self.session_list.currentItem()
+            if item:
+                session_id = item.data(QtCore.Qt.UserRole)
+                current_id = _gui_ctx.runtime.manager.current_id
+                if session_id == current_id:
+                    self._start_rename(item)
+
+    def _start_rename(self, item):
+        self._editing_item = item
+        self.session_list.editItem(item)
+
+    def _finish_rename(self):
+        if self._editing_item:
+            new_title = self._editing_item.text().split(" (")[0]
+            session_id = self._editing_item.data(QtCore.Qt.UserRole)
+            try:
+                _gui_ctx.runtime.manager.rename(session_id, new_title)
+                self.refresh()
+            except SessionError as e:
+                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+            self._editing_item = None
+
+    def _on_new_session(self):
+        if _gui_ctx.runtime is None:
+            return
+        title, ok = QtWidgets.QInputDialog.getText(self, "新建会话", "输入会话标题：")
+        if ok and title.strip():
+            try:
+                _gui_ctx.runtime.manager.new_session(title.strip())
+                self.refresh()
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+        elif ok:
+            try:
+                _gui_ctx.runtime.manager.new_session("新会话")
+                self.refresh()
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+
+    def _on_compact(self):
+        if _gui_ctx.runtime is None:
+            return
+        from .compaction import compact
+        from .config import COMPACT_RECENT_MESSAGES
+        session = _gui_ctx.runtime.manager.current
+        result = compact(_gui_ctx.runtime.client, session, COMPACT_RECENT_MESSAGES)
+        if result["applied"]:
+            try:
+                _gui_ctx.runtime.manager.save(session)
+            except SessionError as e:
+                QtWidgets.QMessageBox.warning(self, "警告", f"压缩成功但保存失败: {e}")
+            QtWidgets.QMessageBox.information(self, "压缩完成",
+                f"旧消息数: {result['old_count']}\n保留消息数: {result['recent_count']}\n\n摘要:\n{result['summary']}")
+            self.refresh()
+        else:
+            QtWidgets.QMessageBox.information(self, "无需压缩", result.get("reason", ""))
+
+    def _on_send(self):
+        if _gui_ctx.runtime is None:
+            return
+        message = self.input_edit.text().strip()
+        if not message:
+            return
+
+        _gui_ctx.clear_events()
+        session = _gui_ctx.runtime.manager.current
+        result = _gui_ctx.runtime.run(
+            session, message, on_event=_event_collector,
+            approval_fn=_gui_approval, skill_name=None
+        )
+
+        events = _gui_ctx.clear_events()
+        trace_lines = []
+        for ev in events:
+            kind = ev["kind"]
+            time = ev["time"]
+            data = ev["data"]
+            if kind == "tool_call":
+                trace_lines.append(f"🔧 [{time}] {data['tool']} {data['args']}")
+            elif kind == "approval":
+                trace_lines.append(f"⚠️ [{time}] 需要审批: {data['tool']}")
+            elif kind == "approval_result":
+                verb = "✅ 批准" if data["approved"] else "❌ 拒绝"
+                trace_lines.append(f"📋 [{time}] {data['tool']} {verb}")
+            elif kind == "tool_result":
+                status = "成功" if data["ok"] else "失败"
+                text = data["output"] if data["ok"] else data["error"]
+                preview = text if len(text) <= 500 else text[:500] + " ...(已截断)"
+                trace_lines.append(f"📊 [{time}] {data['tool']} ({status}): {preview}")
+            elif kind == "skill":
+                src = "用户指定" if data.get("source") == "explicit" else "模型自主"
+                trace_lines.append(f"🧩 [{time}] 已加载技能: {data['skill']}（{src}）")
+            elif kind == "compaction":
+                if data.get("applied"):
+                    trace_lines.append(f"📦 [{time}] 已压缩: 旧消息={data['old_count']}, 保留={data['recent_count']}")
+
+        if trace_lines:
+            result_text = "\n".join(trace_lines) + "\n\n" + ("=" * 60) + "\n" + (result or "调用失败")
+        else:
+            result_text = result or "调用失败"
+
+        QtWidgets.QMessageBox.information(self, "回复", result_text)
+        self.input_edit.clear()
+        self.refresh()
 
 
-# ---------- Skill ----------
+class MemoryWidget(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._setup_ui()
 
-def list_skills() -> str:
-    """列出所有可用技能"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    skills = _gui_ctx.runtime.skill_registry.list() if _gui_ctx.runtime.skill_registry else []
-    if not skills:
-        return "（暂无可用技能）"
-    lines = []
-    for s in skills:
-        lines.append(f"📦 {s['name']}")
-        lines.append(f"   {s['description']}")
-    return "\n".join(lines)
+    def _setup_ui(self):
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
+        self.left_panel = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(self.left_panel)
+        left_layout.setContentsMargins(5, 5, 5, 5)
+        left_layout.setSpacing(3)
 
-def show_skill(name: str) -> str:
-    """查看某个技能的详细说明"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    if not _gui_ctx.runtime.skill_registry or not _gui_ctx.runtime.skill_registry.has(name):
-        return f"❌ 不存在名为 '{name}' 的技能"
-    try:
-        skill = _gui_ctx.runtime.skill_registry.load(name)
-        lines = [
-            f"技能: {skill.name}",
-            f"描述: {skill.description}",
-            "-" * 40,
-            skill.instructions or "（无正文）",
-        ]
-        if skill.resources:
-            lines.append("-" * 40)
-            lines.append("资源文件:")
-            for rel in skill.resources:
-                lines.append(f"  - {rel}")
-        return "\n".join(lines)
-    except Exception as e:
-        return f"❌ 加载失败: {e}"
+        self.memory_list = QtWidgets.QListWidget()
+        self.memory_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.memory_list.itemDoubleClicked.connect(self._on_item_double_click)
+        self.memory_list.keyPressEvent = self._on_key_press
+        left_layout.addWidget(QtWidgets.QLabel("记忆列表"))
+        left_layout.addWidget(self.memory_list)
 
+        self.new_btn = QtWidgets.QPushButton("新建记忆")
+        self.new_btn.clicked.connect(self._on_new_memory)
+        left_layout.addWidget(self.new_btn)
 
-def skill_usage() -> str:
-    """查看当前会话的技能使用记录"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    session = _gui_ctx.runtime.manager.current
-    usages = getattr(session, "skill_usages", [])
-    if not usages:
-        return "（本会话暂无技能使用记录）"
-    lines = []
-    for u in usages:
-        src = u.get("source", "")
-        reason = f" 理由={u['reason']}" if u.get("reason") else ""
-        lines.append(f"{u.get('usedAt', '')} · {u.get('skill', '')}（{src}）{reason}")
-        task = u.get("task", "")
-        if task:
-            lines.append(f"      任务: {task}")
-    return "\n".join(lines)
+        layout.addWidget(self.left_panel, 1)
 
+        self.right_panel = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(self.right_panel)
+        right_layout.setContentsMargins(5, 5, 5, 5)
+        right_layout.setSpacing(3)
 
-# ---------- 聊天 ----------
+        self.content_label = QtWidgets.QLabel("记忆内容：")
+        right_layout.addWidget(self.content_label)
 
-def chat(message: str, skill_name: str = "") -> str:
-    """与模型对话（支持显式使用技能）
+        self.content_edit = QtWidgets.QTextEdit()
+        right_layout.addWidget(self.content_edit)
 
-    Args:
-        message: 用户输入的消息
-        skill_name: 可选，指定使用某个技能（免审批），留空则不使用技能
-    """
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    if not message.strip():
-        return "❌ 消息不能为空"
+        self.save_btn = QtWidgets.QPushButton("保存")
+        self.save_btn.clicked.connect(self._on_save)
+        right_layout.addWidget(self.save_btn)
 
-    _gui_ctx.clear_events()
+        layout.addWidget(self.right_panel, 2)
 
-    session = _gui_ctx.runtime.manager.current
-    result = _gui_ctx.runtime.run(
-        session,
-        message.strip(),
-        on_event=_event_collector,
-        approval_fn=_gui_approval,
-        skill_name=skill_name.strip() or None,
-    )
+        self._editing_item = None
 
-    events = _gui_ctx.clear_events()
-    trace_lines = []
-    for ev in events:
-        kind = ev["kind"]
-        time = ev["time"]
-        data = ev["data"]
-        if kind == "tool_call":
-            trace_lines.append(f"🔧 [{time}] {data['tool']} {data['args']}")
-        elif kind == "approval":
-            trace_lines.append(f"⚠️ [{time}] 需要审批: {data['tool']}")
-        elif kind == "approval_result":
-            verb = "✅ 批准" if data["approved"] else "❌ 拒绝"
-            trace_lines.append(f"📋 [{time}] {data['tool']} {verb}")
-        elif kind == "tool_result":
-            status = "成功" if data["ok"] else "失败"
-            text = data["output"] if data["ok"] else data["error"]
-            preview = text if len(text) <= 500 else text[:500] + " ...(已截断)"
-            trace_lines.append(f"📊 [{time}] {data['tool']} ({status}): {preview}")
-        elif kind == "skill":
-            src = "用户指定" if data.get("source") == "explicit" else "模型自主"
-            trace_lines.append(f"🧩 [{time}] 已加载技能: {data['skill']}（{src}）")
-        elif kind == "compaction":
-            if data.get("applied"):
-                trace_lines.append(f"📦 [{time}] 已压缩: 旧消息={data['old_count']}, 保留={data['recent_count']}")
+    def refresh(self):
+        if _gui_ctx.runtime is None:
+            return
+        self.memory_list.clear()
+        memories = _gui_ctx.runtime.memory_store.list()
+        for m in memories:
+            item = QtWidgets.QListWidgetItem()
+            item.setText(f"{m['id']}: {m['content'][:30]}...")
+            item.setData(QtCore.Qt.UserRole, m)
+            self.memory_list.addItem(item)
+        self.content_edit.clear()
 
-    if trace_lines:
-        return "\n".join(trace_lines) + "\n\n" + ("=" * 60) + "\n" + (result or "❌ 调用失败")
-    else:
-        return result or "❌ 调用失败"
+    def _on_item_double_click(self, item):
+        if _gui_ctx.runtime is None:
+            return
+        memory = item.data(QtCore.Qt.UserRole)
+        self.content_edit.setPlainText(memory["content"])
 
+    def _on_key_press(self, event):
+        if event.key() == QtCore.Qt.Key_Delete:
+            self._on_delete()
+        elif event.key() == QtCore.Qt.Key_Return or event.key() == QtCore.Qt.Key_Enter:
+            self._on_enter_key()
+        else:
+            super(type(self.memory_list), self.memory_list).keyPressEvent(event)
 
-# ---------- 压缩 ----------
+    def _on_delete(self):
+        if _gui_ctx.runtime is None:
+            return
+        item = self.memory_list.currentItem()
+        if item is None:
+            return
+        memory = item.data(QtCore.Qt.UserRole)
+        reply = QtWidgets.QMessageBox.question(
+            self, "确认删除", f"确定删除记忆 '{memory['id']}' 吗？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            try:
+                _gui_ctx.runtime.memory_store.delete(memory["id"])
+                self.refresh()
+            except MemoryError as e:
+                QtWidgets.QMessageBox.warning(self, "错误", str(e))
 
-def compact_session() -> str:
-    """手动压缩当前会话"""
-    if _gui_ctx.runtime is None:
-        return "❌ 运行时未初始化，请先执行【初始化运行时】"
-    from .compaction import compact
-    from .config import COMPACT_RECENT_MESSAGES
-    session = _gui_ctx.runtime.manager.current
-    result = compact(_gui_ctx.runtime.client, session, COMPACT_RECENT_MESSAGES)
-    if result["applied"]:
+    def _on_enter_key(self):
+        if self._editing_item:
+            self._finish_rename()
+        else:
+            item = self.memory_list.currentItem()
+            if item:
+                self._start_rename(item)
+
+    def _start_rename(self, item):
+        self._editing_item = item
+        self.memory_list.editItem(item)
+
+    def _finish_rename(self):
+        if self._editing_item:
+            new_content = self._editing_item.text().split(": ", 1)[-1]
+            memory = self._editing_item.data(QtCore.Qt.UserRole)
+            try:
+                _gui_ctx.runtime.memory_store.add(new_content)
+                _gui_ctx.runtime.memory_store.delete(memory["id"])
+                self.refresh()
+            except MemoryError as e:
+                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+            self._editing_item = None
+
+    def _on_new_memory(self):
+        if _gui_ctx.runtime is None:
+            return
+        content, ok = QtWidgets.QInputDialog.getMultiLineText(self, "新建记忆", "输入记忆内容：")
+        if ok and content.strip():
+            try:
+                _gui_ctx.runtime.memory_store.add(content.strip())
+                self.refresh()
+            except MemoryError as e:
+                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+
+    def _on_save(self):
+        if _gui_ctx.runtime is None:
+            return
+        item = self.memory_list.currentItem()
+        if item is None:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先选择一个记忆")
+            return
+        memory = item.data(QtCore.Qt.UserRole)
+        new_content = self.content_edit.toPlainText().strip()
+        if not new_content:
+            QtWidgets.QMessageBox.warning(self, "提示", "内容不能为空")
+            return
         try:
-            _gui_ctx.runtime.manager.save(session)
-        except SessionError as e:
-            return f"⚠️ 压缩成功但保存失败: {e}"
-        return f"✅ 压缩完成\n旧消息数: {result['old_count']}\n保留消息数: {result['recent_count']}\n\n摘要:\n{result['summary']}"
-    else:
-        return f"ℹ️ 无需压缩（{result.get('reason', '')}）"
+            _gui_ctx.runtime.memory_store.add(new_content)
+            _gui_ctx.runtime.memory_store.delete(memory["id"])
+            self.refresh()
+            QtWidgets.QMessageBox.information(self, "成功", "记忆已保存")
+        except MemoryError as e:
+            QtWidgets.QMessageBox.warning(self, "错误", str(e))
 
 
-# ---------- GUI 入口 ----------
+class WorkspaceWidget(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.left_panel = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(self.left_panel)
+        left_layout.setContentsMargins(5, 5, 5, 5)
+        left_layout.setSpacing(3)
+
+        self.file_list = QtWidgets.QListWidget()
+        self.file_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.file_list.itemDoubleClicked.connect(self._on_item_double_click)
+        self.file_list.keyPressEvent = self._on_key_press
+        left_layout.addWidget(QtWidgets.QLabel("文件列表"))
+        left_layout.addWidget(self.file_list)
+
+        self.new_btn = QtWidgets.QPushButton("新建文件")
+        self.new_btn.clicked.connect(self._on_new_file)
+        left_layout.addWidget(self.new_btn)
+
+        self.set_ws_btn = QtWidgets.QPushButton("设置 Workspace")
+        self.set_ws_btn.clicked.connect(self._on_set_workspace)
+        left_layout.addWidget(self.set_ws_btn)
+
+        layout.addWidget(self.left_panel, 1)
+
+        self.right_panel = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(self.right_panel)
+        right_layout.setContentsMargins(5, 5, 5, 5)
+        right_layout.setSpacing(3)
+
+        self.ws_label = QtWidgets.QLabel("当前 Workspace：未设置")
+        right_layout.addWidget(self.ws_label)
+
+        self.content_label = QtWidgets.QLabel("文件内容：")
+        right_layout.addWidget(self.content_label)
+
+        self.content_edit = QtWidgets.QTextEdit()
+        right_layout.addWidget(self.content_edit)
+
+        self.save_btn = QtWidgets.QPushButton("保存文件")
+        self.save_btn.clicked.connect(self._on_save)
+        right_layout.addWidget(self.save_btn)
+
+        layout.addWidget(self.right_panel, 2)
+
+        self._editing_item = None
+
+    def refresh(self):
+        if _gui_ctx.runtime is None:
+            return
+        session = _gui_ctx.runtime.manager.current
+        ws = getattr(session, "workspace", None)
+        self.ws_label.setText(f"当前 Workspace：{ws or '未设置'}")
+        self.file_list.clear()
+        if ws:
+            import os
+            try:
+                for f in os.listdir(ws):
+                    full_path = os.path.join(ws, f)
+                    if os.path.isfile(full_path):
+                        item = QtWidgets.QListWidgetItem(f)
+                        item.setData(QtCore.Qt.UserRole, full_path)
+                        self.file_list.addItem(item)
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "错误", f"读取目录失败: {e}")
+
+    def _on_item_double_click(self, item):
+        full_path = item.data(QtCore.Qt.UserRole)
+        try:
+            with open(full_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            self.content_edit.setPlainText(content)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "错误", f"读取文件失败: {e}")
+
+    def _on_key_press(self, event):
+        if event.key() == QtCore.Qt.Key_Delete:
+            self._on_delete()
+        elif event.key() == QtCore.Qt.Key_Return or event.key() == QtCore.Qt.Key_Enter:
+            self._on_enter_key()
+        else:
+            super(type(self.file_list), self.file_list).keyPressEvent(event)
+
+    def _on_delete(self):
+        item = self.file_list.currentItem()
+        if item is None:
+            return
+        full_path = item.data(QtCore.Qt.UserRole)
+        reply = QtWidgets.QMessageBox.question(
+            self, "确认删除", f"确定删除文件 '{item.text()}' 吗？",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            import os
+            try:
+                os.remove(full_path)
+                self.refresh()
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+
+    def _on_enter_key(self):
+        if self._editing_item:
+            self._finish_rename()
+        else:
+            item = self.file_list.currentItem()
+            if item:
+                self._start_rename(item)
+
+    def _start_rename(self, item):
+        self._editing_item = item
+        self.file_list.editItem(item)
+
+    def _finish_rename(self):
+        if self._editing_item:
+            old_path = self._editing_item.data(QtCore.Qt.UserRole)
+            new_name = self._editing_item.text()
+            import os
+            new_path = os.path.join(os.path.dirname(old_path), new_name)
+            try:
+                os.rename(old_path, new_path)
+                self.refresh()
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+            self._editing_item = None
+
+    def _on_new_file(self):
+        if _gui_ctx.runtime is None:
+            return
+        session = _gui_ctx.runtime.manager.current
+        ws = getattr(session, "workspace", None)
+        if not ws:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先设置 Workspace")
+            return
+        filename, ok = QtWidgets.QInputDialog.getText(self, "新建文件", "输入文件名：")
+        if ok and filename.strip():
+            import os
+            full_path = os.path.join(ws, filename.strip())
+            if os.path.exists(full_path):
+                QtWidgets.QMessageBox.warning(self, "错误", "文件已存在")
+                return
+            try:
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write("")
+                self.refresh()
+            except Exception as e:
+                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+
+    def _on_set_workspace(self):
+        if _gui_ctx.runtime is None:
+            return
+        path = QtWidgets.QFileDialog.getExistingDirectory(self, "选择 Workspace 目录")
+        if path:
+            try:
+                ws = normalize_workspace(path)
+                session = _gui_ctx.runtime.manager.current
+                session.workspace = ws
+                _gui_ctx.runtime.manager.save(session)
+                self.refresh()
+                QtWidgets.QMessageBox.information(self, "成功", f"Workspace 已设置为: {ws}")
+            except WorkspaceError as e:
+                QtWidgets.QMessageBox.warning(self, "错误", str(e))
+            except SessionError as e:
+                QtWidgets.QMessageBox.warning(self, "错误", f"保存失败: {e}")
+
+    def _on_save(self):
+        if _gui_ctx.runtime is None:
+            return
+        item = self.file_list.currentItem()
+        if item is None:
+            QtWidgets.QMessageBox.warning(self, "提示", "请先选择一个文件")
+            return
+        full_path = item.data(QtCore.Qt.UserRole)
+        content = self.content_edit.toPlainText()
+        try:
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            QtWidgets.QMessageBox.information(self, "成功", "文件已保存")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "错误", str(e))
+
+
+class SkillWidget(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.left_panel = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(self.left_panel)
+        left_layout.setContentsMargins(5, 5, 5, 5)
+        left_layout.setSpacing(3)
+
+        self.skill_list = QtWidgets.QListWidget()
+        self.skill_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.skill_list.itemDoubleClicked.connect(self._on_item_double_click)
+        left_layout.addWidget(QtWidgets.QLabel("技能列表"))
+        left_layout.addWidget(self.skill_list)
+
+        self.usage_btn = QtWidgets.QPushButton("查看使用记录")
+        self.usage_btn.clicked.connect(self._on_usage)
+        left_layout.addWidget(self.usage_btn)
+
+        layout.addWidget(self.left_panel, 1)
+
+        self.right_panel = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(self.right_panel)
+        right_layout.setContentsMargins(5, 5, 5, 5)
+        right_layout.setSpacing(3)
+
+        self.name_label = QtWidgets.QLabel("技能名称：")
+        right_layout.addWidget(self.name_label)
+
+        self.desc_label = QtWidgets.QLabel("描述：")
+        right_layout.addWidget(self.desc_label)
+
+        self.content_edit = QtWidgets.QTextEdit()
+        self.content_edit.setReadOnly(True)
+        right_layout.addWidget(self.content_edit)
+
+        self.resources_label = QtWidgets.QLabel("资源文件：")
+        right_layout.addWidget(self.resources_label)
+
+        layout.addWidget(self.right_panel, 2)
+
+    def refresh(self):
+        if _gui_ctx.runtime is None:
+            return
+        self.skill_list.clear()
+        skills = _gui_ctx.runtime.skill_registry.list() if _gui_ctx.runtime.skill_registry else []
+        for s in skills:
+            item = QtWidgets.QListWidgetItem(s["name"])
+            item.setData(QtCore.Qt.UserRole, s["name"])
+            self.skill_list.addItem(item)
+        self.name_label.setText("技能名称：")
+        self.desc_label.setText("描述：")
+        self.content_edit.clear()
+        self.resources_label.setText("资源文件：")
+
+    def _on_item_double_click(self, item):
+        if _gui_ctx.runtime is None:
+            return
+        name = item.data(QtCore.Qt.UserRole)
+        if not _gui_ctx.runtime.skill_registry or not _gui_ctx.runtime.skill_registry.has(name):
+            QtWidgets.QMessageBox.warning(self, "错误", f"不存在名为 '{name}' 的技能")
+            return
+        try:
+            skill = _gui_ctx.runtime.skill_registry.load(name)
+            self.name_label.setText(f"技能名称：{skill.name}")
+            self.desc_label.setText(f"描述：{skill.description}")
+            self.content_edit.setPlainText(skill.instructions or "")
+            if skill.resources:
+                self.resources_label.setText("资源文件：" + ", ".join(skill.resources))
+            else:
+                self.resources_label.setText("资源文件：无")
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "错误", f"加载失败: {e}")
+
+    def _on_usage(self):
+        if _gui_ctx.runtime is None:
+            return
+        session = _gui_ctx.runtime.manager.current
+        usages = getattr(session, "skill_usages", [])
+        if not usages:
+            QtWidgets.QMessageBox.information(self, "技能使用记录", "本会话暂无技能使用记录")
+            return
+        lines = []
+        for u in usages:
+            src = u.get("source", "")
+            reason = f" 理由={u['reason']}" if u.get("reason") else ""
+            lines.append(f"{u.get('usedAt', '')} · {u.get('skill', '')}（{src}）{reason}")
+            task = u.get("task", "")
+            if task:
+                lines.append(f"      任务: {task}")
+        QtWidgets.QMessageBox.information(self, "技能使用记录", "\n".join(lines))
+
+
+class MainWindow(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("DD-SJTUClaw - 智能对话助手")
+        self.setGeometry(100, 100, 1000, 700)
+        self._setup_ui()
+        self._init_runtime()
+
+    def _setup_ui(self):
+        central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QtWidgets.QVBoxLayout(central_widget)
+
+        button_bar = QtWidgets.QWidget()
+        button_layout = QtWidgets.QHBoxLayout(button_bar)
+        button_layout.setContentsMargins(5, 5, 5, 5)
+        button_layout.setSpacing(5)
+
+        self.session_btn = QtWidgets.QPushButton("管理会话")
+        self.session_btn.clicked.connect(self._show_session)
+        button_layout.addWidget(self.session_btn)
+
+        self.workspace_btn = QtWidgets.QPushButton("管理工作区")
+        self.workspace_btn.clicked.connect(self._show_workspace)
+        button_layout.addWidget(self.workspace_btn)
+
+        self.memory_btn = QtWidgets.QPushButton("管理记忆")
+        self.memory_btn.clicked.connect(self._show_memory)
+        button_layout.addWidget(self.memory_btn)
+
+        self.skill_btn = QtWidgets.QPushButton("管理技能")
+        self.skill_btn.clicked.connect(self._show_skill)
+        button_layout.addWidget(self.skill_btn)
+
+        layout.addWidget(button_bar)
+
+        self.stacked_widget = QtWidgets.QStackedWidget()
+        layout.addWidget(self.stacked_widget)
+
+        self.session_widget = SessionWidget()
+        self.stacked_widget.addWidget(self.session_widget)
+
+        self.memory_widget = MemoryWidget()
+        self.stacked_widget.addWidget(self.memory_widget)
+
+        self.workspace_widget = WorkspaceWidget()
+        self.stacked_widget.addWidget(self.workspace_widget)
+
+        self.skill_widget = SkillWidget()
+        self.stacked_widget.addWidget(self.skill_widget)
+
+        self.stacked_widget.setCurrentIndex(0)
+
+    def _init_runtime(self):
+        try:
+            _gui_ctx.init_runtime()
+            self.session_widget.refresh()
+            self.memory_widget.refresh()
+            self.workspace_widget.refresh()
+            self.skill_widget.refresh()
+            QtWidgets.QMessageBox.information(self, "初始化完成",
+                f"运行时初始化成功\n模型: {DEFAULT_MODEL}\n会话: {len(_gui_ctx.runtime.manager.sessions)} 个\n技能: {len(_gui_ctx.runtime.skill_registry.list())} 个")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "初始化失败", str(e))
+            sys.exit(1)
+
+    def _show_session(self):
+        self.stacked_widget.setCurrentIndex(0)
+        self.session_widget.refresh()
+
+    def _show_workspace(self):
+        self.stacked_widget.setCurrentIndex(2)
+        self.workspace_widget.refresh()
+
+    def _show_memory(self):
+        self.stacked_widget.setCurrentIndex(1)
+        self.memory_widget.refresh()
+
+    def _show_skill(self):
+        self.stacked_widget.setCurrentIndex(3)
+        self.skill_widget.refresh()
+
 
 def main():
     for stream in (sys.stdout, sys.stdin):
@@ -335,124 +818,10 @@ def main():
         except (AttributeError, ValueError):
             pass
 
-    adapter = GUIAdapter(
-        app_style="Fusion",
-        always_show_selection_window=True,
-    )
-
-    adapter.add(
-        _gui_ctx.init_runtime,
-        display_name="初始化运行时",
-        display_document="启动前必须先执行此操作，初始化 LLM 客户端、会话管理器、工具注册表等。",
-        window_title="DD-SJTUClaw - 初始化",
-    )
-
-    adapter.add(
-        chat,
-        display_name="聊天",
-        display_document="与模型对话，支持工具调用和技能使用。高级工具（写文件/执行命令）需要先设置 workspace。",
-        window_title="DD-SJTUClaw - 聊天",
-    )
-
-    adapter.add(
-        list_sessions,
-        display_name="列出会话",
-        display_document="显示所有会话列表，⭐️ 标记为当前会话。",
-        window_title="DD-SJTUClaw - 会话列表",
-    )
-
-    adapter.add(
-        new_session,
-        display_name="新建会话",
-        display_document="创建一个新会话。",
-        window_title="DD-SJTUClaw - 新建会话",
-    )
-
-    adapter.add(
-        switch_session,
-        display_name="切换会话",
-        display_document="切换到指定会话，支持简写（如 001 或 1）。",
-        window_title="DD-SJTUClaw - 切换会话",
-    )
-
-    adapter.add(
-        delete_session,
-        display_name="删除会话",
-        display_document="删除指定会话。",
-        window_title="DD-SJTUClaw - 删除会话",
-    )
-
-    adapter.add(
-        rename_session,
-        display_name="重命名会话",
-        display_document="修改会话标题。",
-        window_title="DD-SJTUClaw - 重命名会话",
-    )
-
-    adapter.add(
-        list_memories,
-        display_name="列出记忆",
-        display_document="显示所有长期记忆。",
-        window_title="DD-SJTUClaw - 长期记忆",
-    )
-
-    adapter.add(
-        add_memory,
-        display_name="添加记忆",
-        display_document="添加一条跨会话共享的长期记忆。",
-        window_title="DD-SJTUClaw - 添加记忆",
-    )
-
-    adapter.add(
-        delete_memory,
-        display_name="删除记忆",
-        display_document="删除指定的长期记忆。",
-        window_title="DD-SJTUClaw - 删除记忆",
-    )
-
-    adapter.add(
-        show_workspace,
-        display_name="查看 Workspace",
-        display_document="查看当前会话的 workspace 设置。",
-        window_title="DD-SJTUClaw - Workspace",
-    )
-
-    adapter.add(
-        set_workspace,
-        display_name="设置 Workspace",
-        display_document="设置当前会话可操作的项目目录，高级工具的读写被限制在此目录内。",
-        window_title="DD-SJTUClaw - 设置 Workspace",
-    )
-
-    adapter.add(
-        list_skills,
-        display_name="列出技能",
-        display_document="显示所有可用技能及其描述。",
-        window_title="DD-SJTUClaw - 技能列表",
-    )
-
-    adapter.add(
-        show_skill,
-        display_name="查看技能",
-        display_document="查看某个技能的完整说明和资源文件。",
-        window_title="DD-SJTUClaw - 技能详情",
-    )
-
-    adapter.add(
-        skill_usage,
-        display_name="技能使用记录",
-        display_document="查看当前会话的技能使用历史。",
-        window_title="DD-SJTUClaw - 技能使用记录",
-    )
-
-    adapter.add(
-        compact_session,
-        display_name="压缩会话",
-        display_document="手动压缩当前会话的较早消息为摘要，保留最近消息。",
-        window_title="DD-SJTUClaw - 压缩会话",
-    )
-
-    adapter.run()
+    app = QtWidgets.QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":
